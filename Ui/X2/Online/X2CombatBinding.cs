@@ -234,8 +234,9 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
             var unit = _world.Get(_world.PlayerId);
             var equipment = _session.InventoryState.Items
                 .Where(pair => pair.Key.SlotType == (byte)InventorySlotType.Equipment)
-                .Select(pair => checked((uint)pair.Value.TemplateId))
-                .Where(id => id != 0).ToArray();
+                .Where(pair => pair.Value.TemplateId != 0)
+                .Select(pair => new ClientEquippedItem(checked((uint)pair.Value.TemplateId),
+                    pair.Value.Grade, pair.Key.Slot)).ToArray();
             var buffs = player.Buffs.Values.Select(buff => (buff.BuffId, buff.Stacks))
                 .Concat(player.PassiveBuffs.Select(id => (id, 1u))).ToArray();
             var race = unit?.Race switch
@@ -257,7 +258,8 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
             foreach (var (key, field) in CharacterStatisticFields)
                 result[key] = V(field);
         }
-        result["move_speed_rate"] = 100;
+        // percent of the base run speed (buffs move it); 100 while the calculator has nothing
+        if (result["move_speed_rate"] == 0) result["move_speed_rate"] = 100;
         return result;
     }
 
@@ -280,7 +282,9 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
          "ranged_critical_rate ranged_damage_mul ranged_damage_mul_anti_npc ranged_damage_mul_anti_pc " +
          "ranged_dps ranged_max_dps ranged_min_dps ranged_speed ranged_success_rate " +
          "spell_critical_bonus spell_critical_rate spell_damage_mul spell_damage_mul_anti_npc " +
-         "spell_damage_mul_anti_pc spell_dps spell_success_rate spi sta str")
+         "spell_damage_mul_anti_pc spell_dps spell_success_rate spi sta str " +
+         "casting_time_mul global_cooldown_mul ignore_shield_bonus ignore_shield_bonus_mul " +
+         "magic_effect_resist_percentage mainhand_melee_speed offhand_melee_speed ranged_parry_rate")
         .Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
     private static readonly IReadOnlyDictionary<string, CharacterStatField> CharacterStatisticFields =

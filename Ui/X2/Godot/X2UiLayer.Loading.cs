@@ -10,6 +10,9 @@ namespace AAEmu.GodotViewer.Ui.X2;
 // attach), all while our world is still behind its loading screen, so the banner was shown and used up unseen.
 // While the world's LoadingScreen exists and has not closed since world entry, LEFT_LOADING is held and sent once
 // when it closes (and again after every later load). Without a LoadingScreen (offline UI test) nothing is held.
+// The hold has to be in place before the world stage is built (X2LoginSession.StartInWorld in _Ready): that build
+// dispatches a LEFT_LOADING of its own, the banner script took it for the end of loading, announced the zone behind
+// the loading screen and ignored the real event afterwards.
 public partial class X2UiLayer
 {
     private CanvasLayer? _loadingScreen;
@@ -17,6 +20,19 @@ public partial class X2UiLayer
     private double _sinceAttach;
     private UiRoot? _filteredRoot;
     private Client.OnlineSession? _loadingSession;
+    private Func<string, bool>? _leftLoadingFilter;
+
+    /// <summary>Installs the LEFT_LOADING hold for every UI root (called before the first stage is built).</summary>
+    private void InstallLeftLoadingFilter()
+    {
+        _leftLoadingFilter = name => name != "LEFT_LOADING" || !IsInsideTree() || !HoldLeftLoading();
+        UiRoot.DefaultEventFilter = _leftLoadingFilter;
+    }
+
+    private void RemoveLeftLoadingFilter()
+    {
+        if (ReferenceEquals(UiRoot.DefaultEventFilter, _leftLoadingFilter)) UiRoot.DefaultEventFilter = null;
+    }
 
     private bool LoadingScreenVisible()
     {
@@ -37,8 +53,6 @@ public partial class X2UiLayer
 
     private void LoadingTick(double delta)
     {
-        // the world stage's root dispatches LEFT_LOADING while it is built (X2Engine), before this tick sees the root
-        UiRoot.DefaultEventFilter ??= name => name != "LEFT_LOADING" || !IsInsideTree() || !HoldLeftLoading();
         if (_session.Root is { } root && !ReferenceEquals(root, _filteredRoot))
         {
             _filteredRoot = root;

@@ -404,6 +404,16 @@ public partial class X2UiLayer
             case "lua":
                 _session.Host?.RunString(arg, "=scenario");
                 break;
+            case "event":
+            {
+                // event <NAME> [args...]: dispatches a game event to the UI as the client would (numbers become numbers)
+                var eventParts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (eventParts.Length == 0) break;
+                var eventArgs = eventParts.Skip(1).Select(p => double.TryParse(p, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var number) ? (object)number : p).ToArray();
+                _session.Root?.DispatchEvent(eventParts[0], eventArgs);
+                break;
+            }
             case "sweepbegin":
                 // sweepbegin <label>: marks the log and the visible widgets before opening a content
                 _sweepLabel = arg;

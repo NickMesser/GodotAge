@@ -203,6 +203,7 @@ public partial class X2UiLayer : Control
         InitializeModelViews();
         UpdateScreenSize();
         Resized += UpdateScreenSize;
+        InstallLeftLoadingFilter();
         if (_startInWorld)
         {
             InWorld = true;
@@ -217,6 +218,7 @@ public partial class X2UiLayer : Control
 
     public override void _ExitTree()
     {
+        RemoveLeftLoadingFilter();
         DisposeModelViews();
         DisposeProtocolBinding();
         _combatBinding?.Dispose();
