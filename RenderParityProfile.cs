@@ -17,9 +17,16 @@ internal static class RenderParityProfile
         environment.SsaoEnabled = ssao;
         environment.SsrEnabled = ssr;
         environment.GlowEnabled = glow;
-        // No Cry bright-pass threshold is serialized in this world's environment files; keep Godot's documented 1.0 threshold.
-        environment.GlowHdrThreshold = 1f;
+        // The client's HDR bloom (postprocess.cfx): a bright pass on the quarter-resolution scene, blurred at 1/4, 1/8 and
+        // 1/16 resolution, composed with the weights 2.0 / 1.15 / 0.45 (ComposeFinalHDRGlow) and added to the exposed
+        // scene before the film curve (FilmicMapping: exposure * scene + bloom * 0.5). Godot's additive glow is the same
+        // pre-tonemap addition; its levels 2..4 are the 1/4..1/16 resolution blurs.
+        environment.GlowBlendMode = Godot.Environment.GlowBlendModeEnum.Additive;
+        environment.GlowNormalized = false;
+        environment.GlowStrength = 1f;
         environment.GlowBloom = 0f;
+        for (var level = 0; level < 7; level++)
+            environment.SetGlowLevel(level, BloomLevelWeights.TryGetValue(level, out var weight) ? weight : 0f);
         RenderingServer.EnvironmentGlowSetUseBicubicUpscale(bicubicGlow);
 
         // A modest aerial component lets distance fog retain sky and sun colour instead of becoming a flat overlay.
@@ -31,9 +38,7 @@ internal static class RenderParityProfile
     public static void ApplyEnvironmentSample(Godot.Environment environment, DirectionalLight3D sun,
         ProceduralSkyMaterial sky, EnvironmentSample sample)
     {
-        environment.GlowIntensity = (float)Math.Clamp(sample.BloomMultiplier, 0.0, 8.0);
-        environment.GlowMap = CreateGlowMap(sample.BloomColor);
-        environment.GlowMapStrength = 1f;
+        ApplyBloom(environment, sample);
         environment.SsaoIntensity = (float)Math.Clamp(sample.SsdoAmount * sample.SsdoAmbientAmount, 0.0, 4.0);
         environment.AdjustmentEnabled = true;
         environment.AdjustmentSaturation = (float)Math.Clamp(sample.HdrCurveSaturation * sample.ColorSaturation, 0.0, 4.0);
@@ -88,6 +93,37 @@ internal static class RenderParityProfile
     }
 
     public static Color FromSource(System.Numerics.Vector3 color) => new(color.X, color.Y, color.Z);
+
+    // ComposeFinalHDRGlow weights of the 1/4, 1/8 and 1/16 resolution bloom maps, keyed by Godot glow level index.
+    private static readonly Dictionary<int, float> BloomLevelWeights = new() { [1] = 2.0f, [2] = 1.15f, [3] = 0.45f };
+
+    // Client cvar dump (C:\AA\consolecommandsandvars.txt): r_HDRLevel 8, r_HDRBrightThreshold 6, r_HDRBrightOffset 5,
+    // r_HDRBloomMul 0.2.
+    private const float HdrLevel = 8f, HdrBrightThreshold = 6f, HdrBrightOffset = 5f, HdrBloomMul = 0.2f;
+
+    /// <summary>
+    /// The client's bloom for one environment sample. HDRBrightPassFilter keeps, per channel, what exceeds
+    /// r_HDRBrightThreshold / r_HDRLevel (0.75) of the adapted scene level and compresses it with
+    /// y / (r_HDRBrightOffset + y); the final pass multiplies the blurred result by env.xml HDRSetup BloomColor x BloomMul.
+    /// In daylight the adapted level is the bright sky, so only what renders brighter than the sky (sun, glints, hot
+    /// specular, additive effects) blooms; here that level is the zone's film white point, the value this environment
+    /// maps to display white.
+    /// </summary>
+    public static void ApplyBloom(Godot.Environment environment, EnvironmentSample sample)
+    {
+        var white = (float)Math.Clamp(sample.FilmCurveWhitepoint, 1.0, 16.0);
+        environment.GlowHdrThreshold = white * HdrBrightThreshold / HdrLevel;
+        // Soft knee over r_HDRBrightOffset / r_HDRLevel of white, the span in which y / (offset + y) rises to one half.
+        environment.GlowHdrScale = white * HdrBrightOffset / HdrLevel;
+        // y / (offset + y) saturates: very bright sources (the sun disc) cannot outweigh the rest of the bloom.
+        environment.GlowHdrLuminanceCap = white * (HdrBrightThreshold + HdrBrightOffset) / HdrLevel * 2f;
+        environment.GlowIntensity = (float)Math.Clamp(sample.BloomMultiplier * HdrBloomMul * BloomGain, 0.0, 8.0);
+        environment.GlowMap = CreateGlowMap(sample.BloomColor);
+        environment.GlowMapStrength = 1f;
+    }
+
+    /// <summary>Scale between the client's bloom maps and Godot's glow buffer (the bright pass's x8 range, 3/8 and 0.5).</summary>
+    private const float BloomGain = 8f * 3f / 8f * 0.5f;
 
     private static Color Normalized(Color color, float scale)
     {

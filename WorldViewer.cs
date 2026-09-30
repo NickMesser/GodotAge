@@ -25,6 +25,7 @@ namespace AAEmu.GodotViewer;
 /// --water-enhanced[=0|1] --water-waves[=0|1] --water-reflections[=0|1] --water-depth-effects[=0|1]
 /// --ocean-vertex-waves[=0|1] (default 0) --water-underwater-fog[=0|1]
 /// Water defaults: enhanced/waves/reflections/depth-effects/underwater-fog = 1; ocean-vertex-waves = 0.
+/// --water-debug=none|body|reflection|fresnel|transmittance|depth|normal|final (ocean shader terms, unblended)
 /// --shadow-distance=metres --shadow-split1=0..1 --shadow-blur=0..10 --shadow-bias=0..2
 /// --shadow-normal-bias=0..10 --world-lights[=0|1] --fov=degrees
 /// --perf-report[=interval-seconds] (default interval: 2 seconds)
@@ -124,6 +125,13 @@ public partial class WorldViewer : Node3D
     private float _airFogDepthBegin = 10f, _airFogDepthEnd = 100f, _airFogDepthCurve = 1f;
     private Color _waterFogColor = new(0.08f, 0.28f, 0.42f);
     private float _waterFogDensity = 0.02f;
+    // Client ocean optics of the current sample (see OceanOptics), for the depth-dependent underwater in-scatter.
+    private System.Numerics.Vector3 _oceanLitFog;
+    private double _oceanDensityUnderWater = 0.05, _oceanScatterUnderWater = 1;
+    private CeFilmCurve _ceFilm = new(1f, 1f, 1f, 1f);
+    private GodotDisplay _godotDisplay = new(1f, 1f);
+    private float _underwaterColorDepth = float.NaN;
+    private float _airFogAerialPerspective, _airFogSunScatter, _airFogHeightDensity;
     private ProceduralSkyMaterial _sky;
     private ShaderMaterial _dynamicSky;
     private readonly Dictionary<int, EnvironmentReader> _zoneEnvironments = [];
@@ -441,6 +449,7 @@ public partial class WorldViewer : Node3D
                 case "water-depth-effects": RenderWaterDepthEffects = value != "0"; break;
                 case "ocean-vertex-waves": RenderOceanVertexWaves = value != "0"; break;
                 case "water-underwater-fog": RenderUnderwaterFog = value != "0"; break;
+                case "water-debug": WaterMaterialFactory.SetDebugMode(value); break;
                 case "walk": StartInWalkMode = value != "0"; break;
                 case "player": PlayerModelId = long.Parse(value); break;
                 case "avatar": BunnyAvatar = (value.Length == 0 || value.Equals("bunny", StringComparison.OrdinalIgnoreCase)) && SpaceBunnyRunner.Available; break;
@@ -545,6 +554,9 @@ public partial class WorldViewer : Node3D
         }
         if (RenderParity)
             RenderParityProfile.ConfigureEnvironment(_environment, RenderSsao, RenderSsr, RenderGlow, RenderGlowBicubic);
+        _airFogAerialPerspective = _environment.FogAerialPerspective;
+        _airFogSunScatter = _environment.FogSunScatter;
+        _airFogHeightDensity = _environment.FogHeightDensity;
         AddChild(new WorldEnvironment { Environment = _environment });
         _sun = new DirectionalLight3D
         {
@@ -863,8 +875,9 @@ public partial class WorldViewer : Node3D
         if (camera == null || _world == null)
             return;
         var eye = _world.ToCry(camera.GlobalPosition);
+        var surface = 0f;
         var submerged = RenderUnderwaterFog &&
-            _world.TryWaterSurfaceAt(eye.X, eye.Y, out var surface, eye.Z) && eye.Z < surface - 0.1f;
+            _world.TryWaterSurfaceAt(eye.X, eye.Y, out surface, eye.Z) && eye.Z < surface - 0.1f;
         if (RenderParity)
         {
             // Air follows the authored distance ramp; underwater keeps the existing exponential attenuation.
@@ -876,8 +889,58 @@ public partial class WorldViewer : Node3D
                 _environment.FogDepthCurve = _airFogDepthCurve;
             }
         }
-        _environment.FogLightColor = submerged ? _waterFogColor : _airFogColor;
+        if (submerged)
+        {
+            // The client's OceanOutof in-scatter darkens with the camera's depth below the surface: exp2(-d * depth).
+            var depth = MathF.Round((surface - eye.Z) * 4f) / 4f;
+            if (depth != _underwaterColorDepth)
+            {
+                _underwaterColorDepth = depth;
+                _waterFogColor = ToGodot(OceanOptics.InScatter(_oceanLitFog, _oceanDensityUnderWater,
+                    _oceanScatterUnderWater, depth));
+                WaterMaterialFactory.SetUnderwaterColor(_waterFogColor);
+            }
+        }
+        // Underwater fog is the water column's own in-scatter: no sky aerial perspective, sun lobe or air height layer.
+        _environment.FogAerialPerspective = submerged ? 0f : _airFogAerialPerspective;
+        _environment.FogSunScatter = submerged ? 0f : _airFogSunScatter;
+        _environment.FogHeightDensity = submerged ? 0f : _airFogHeightDensity;
+        // Environment colours are sRGB-encoded properties (the renderer decodes them); _waterFogColor is scene-linear.
+        _environment.FogLightColor = submerged ? _waterFogColor.LinearToSrgb() : _airFogColor;
         _environment.FogDensity = submerged ? _waterFogDensity : _airFogDensity;
+    }
+
+    private Color ToGodot(System.Numerics.Vector3 clientColor)
+    {
+        var v = OceanOptics.ToGodotLinear(clientColor, _ceFilm, _godotDisplay);
+        return new Color(v.X, v.Y, v.Z);
+    }
+
+    /// <summary>
+    /// The ocean's optics for a sample: the client's water-column in-scatter (<see cref="OceanOptics"/>) for looking into
+    /// the water and for the submerged camera, mapped through the client's display curve into this environment's units.
+    /// </summary>
+    private void UpdateOceanOptics(EnvironmentSample e, Vector3 ray, (string Name, Variant Value)[] skyParameters)
+    {
+        _ceFilm = CeFilmCurve.From(e);
+        _godotDisplay = new GodotDisplay(_environment.TonemapWhite,
+            _environment.AdjustmentEnabled ? _environment.AdjustmentSaturation : 1f);
+        _oceanLitFog = e.OceanInScatterColor;
+        _oceanDensityUnderWater = e.OceanFogDensityUnderWater;
+        _oceanScatterUnderWater = e.OceanScatterUnderWater;
+        _underwaterColorDepth = float.NaN;
+        _waterFogColor = ToGodot(OceanOptics.InScatter(_oceanLitFog, _oceanDensityUnderWater, _oceanScatterUnderWater));
+        var into = OceanOptics.InScatter(_oceanLitFog, e.OceanFogDensityIntoWater, e.OceanScatterIntoWater);
+        // water.cfx foam: foam texture (about 0.5) x (sun x N.L + sky light), client working values.
+        var toSunHeight = ray.LengthSquared() > 1e-6f ? Math.Max(-ray.Normalized().Y, 0f) : 0f;
+        var foam = (e.SunColor * (float)e.SunIntensity * toSunHeight + e.SkyColor) * 0.5f;
+        var sunMax = Math.Max(e.SunColor.X, Math.Max(e.SunColor.Y, Math.Max(e.SunColor.Z, 1e-4f)));
+        var glint = new Color(e.SunColor.X / sunMax, e.SunColor.Y / sunMax, e.SunColor.Z / sunMax);
+        WaterMaterialFactory.UpdateEnvironment(new OceanShading(
+            ToGodot(into), ToGodot(into * 0.5f), OceanOptics.Log2E * (float)Math.Max(e.OceanFogDensityIntoWater, 1e-4),
+            _waterFogColor, ToGodot(foam), ray, glint, RenderParityProfile.FromSource(e.SunColor * (float)e.SunIntensity),
+            (float)e.SunSpecularMultiplier, skyParameters,
+            _sky.SkyHorizonColor.SrgbToLinear()));
     }
 
     private void AttachAudio(AudioDirector director)
@@ -921,7 +984,10 @@ public partial class WorldViewer : Node3D
 
         _airFogColor = Clamped(e.FogColor);
         _airFogDensity = (float)Math.Clamp(e.FogDensity * 0.0004, 0.00001, 0.002);
-        _waterFogColor = Clamped(e.OceanFogColor);
+        // Start from the air values: a submerged camera has the underwater overrides in the environment right now.
+        _environment.FogAerialPerspective = _airFogAerialPerspective;
+        _environment.FogSunScatter = _airFogSunScatter;
+        _environment.FogHeightDensity = _airFogHeightDensity;
         var toSun = ray.LengthSquared() > 1e-6f ? -ray.Normalized() : Vector3.Up;
         var hdrSkyColor = RenderParity ? RenderParityProfile.FromSource(e.SkyColor) : Clamped(e.SkyColor);
         var hdrHorizon = RenderParity ? RenderParityProfile.FromSource(e.FogTopColor) : Clamped(e.FogTopColor);
@@ -930,11 +996,6 @@ public partial class WorldViewer : Node3D
         var atmosphericSunColor = RenderParity
             ? RenderParityProfile.FromSource(e.SkySunColor)
             : Clamped(e.SkySunColor);
-        Color? skyReflection = RenderSkyHdr
-            ? DynamicSky.ReflectionColor(e, toSun, atmosphericSunColor, hdrSkyColor, hdrHorizon)
-            : null;
-        WaterMaterialFactory.UpdateOceanEnvironment(_waterFogColor, Clamped(e.OceanScatteringColor), ray,
-            _sun.LightColor, (float)e.SunSpecularMultiplier, skyReflection);
         _waterFogDensity = (float)Math.Clamp(e.OceanFogDensityUnderWater, 0.001, 0.08);
         _environment.FogLightColor = _airFogColor;
         _environment.FogDensity = _airFogDensity;
@@ -960,12 +1021,19 @@ public partial class WorldViewer : Node3D
         _airFogDepthBegin = _environment.FogDepthBegin;
         _airFogDepthEnd = _environment.FogDepthEnd;
         _airFogDepthCurve = _environment.FogDepthCurve;
+        _airFogAerialPerspective = _environment.FogAerialPerspective;
+        _airFogSunScatter = _environment.FogSunScatter;
+        _airFogHeightDensity = _environment.FogHeightDensity;
+
+        // e.SunVector is the light-ray direction; the sky shader needs the direction from the viewer to the sun.
+        var skyParameters = RenderSkyHdr
+            ? DynamicSky.Parameters(e, toSun, hdrSkyColor, hdrHorizon, Clamped(e.AmbientColor) * 0.4f, atmosphericSunColor)
+            : [];
+        UpdateOceanOptics(e, ray, skyParameters);
 
         if (RenderSkyHdr)
         {
-            // e.SunVector is the light-ray direction; the sky shader needs the direction from the viewer to the sun.
-            DynamicSky.Apply(_dynamicSky, e, toSun, hdrSkyColor, hdrHorizon,
-                Clamped(e.AmbientColor) * 0.4f, atmosphericSunColor);
+            DynamicSky.Apply(_dynamicSky, skyParameters);
             _environment.Sky.SkyMaterial = _dynamicSky;
             _environment.AmbientLightColor = Colors.White;
             _environment.AmbientLightSkyContribution = 1f;

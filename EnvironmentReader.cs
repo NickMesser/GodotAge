@@ -94,12 +94,14 @@ public sealed class EnvironmentReader
         var nightHorizon = C("Night sky: Horizon color", Vector3.Zero) * (float)S("Night sky: Horizon color multiplier", 1);
         var nightZenith = C("Night sky: Zenith color", Vector3.Zero) * (float)S("Night sky: Zenith color multiplier", 1);
         var moonColor = C("Night sky: Moon color", Vector3.Zero) * (float)S("Night sky: Moon color multiplier", 1);
-        // Cry keeps underwater fog in zone env.xml; surface scattering is this separate TOD color/multiplier pair.
         var oceanScatteringSource = _curves.TryGetValue("Ocean fog color", out var oceanCurve)
             ? oceanCurve.Vector(day, Vector3.Zero)
             : Vector3.Zero;
-        var oceanScattering = (_todColorsAreSrgb ? SrgbToLinear(oceanScatteringSource) : oceanScatteringSource) *
-                              (float)S("Ocean fog color multiplier", 1);
+        // The client's water shaders use the stored TOD values as they are (its renderer does not decode sRGB): the ocean
+        // fog colour lit by the TOD sun is the in-scatter colour of watervolume.cfx (see OceanOptics).
+        var rawSun = _curves.TryGetValue("Sun color", out var sunCurve) ? sunCurve.Vector(day, Vector3.One) : Vector3.One;
+        var oceanInScatter = oceanScatteringSource * (float)S("Ocean fog color multiplier", 1) *
+                             rawSun * (float)(S("Sun color multiplier", 1) * _zone.SunColorMultiplier);
         var fogDensity = S("Volumetric fog: Global density", S("Fog layer density (bottom)", 0)) * _zone.FogGlobalDensityMultiplier;
         var fogRampStart = S("Volumetric fog: Ramp start", 0);
         var fogRampEnd = S("Volumetric fog: Ramp end", 1000);
@@ -132,7 +134,12 @@ public sealed class EnvironmentReader
             FogRampInfluence = fogRampInfluence,
             OceanFogDensityUnderWater = S("Ocean fog density under water", 0.05),
             OceanFogDensityIntoWater = S("Ocean fog density into water", 0.04),
-            OceanScatteringColor = oceanScattering,
+            OceanInScatterColor = oceanInScatter,
+            OceanScatterUnderWater = S("Ocean fog under water Scatter", 1),
+            OceanScatterIntoWater = S("Ocean fog into water Scatter", 1),
+            FilmCurveShoulderScale = S("Film curve shoulder scale", 1),
+            FilmCurveMidtonesScale = S("Film curve midtones scale", 1),
+            FilmCurveToeScale = S("Film curve toe scale", 1),
         };
     }
 
@@ -254,8 +261,17 @@ public sealed record EnvironmentSample(double Hour, double NormalizedDay, Vector
     public double FogRampInfluence { get; init; }
     public double OceanFogDensityUnderWater { get; init; }
     public double OceanFogDensityIntoWater { get; init; }
-    /// <summary>TOD Ocean fog color multiplied by its intensity; distinct from zone underwater fog.</summary>
-    public Vector3 OceanScatteringColor { get; init; }
+    /// <summary>
+    /// The client's ocean in-scatter colour: stored TOD "Ocean fog color" x multiplier, lit by the stored TOD "Sun color" x
+    /// "Sun color multiplier" (client working values, no sRGB decode).
+    /// </summary>
+    public Vector3 OceanInScatterColor { get; init; }
+    public double OceanScatterUnderWater { get; init; } = 1;
+    public double OceanScatterIntoWater { get; init; } = 1;
+    /// <summary>TOD "Film curve shoulder/midtones/toe scale" of the client's filmic display curve (1 = neutral).</summary>
+    public double FilmCurveShoulderScale { get; init; } = 1;
+    public double FilmCurveMidtonesScale { get; init; } = 1;
+    public double FilmCurveToeScale { get; init; } = 1;
 }
 
 public sealed record OceanSettings(string Material, double CausticDepth, double CausticIntensity, double CausticsTiling,
