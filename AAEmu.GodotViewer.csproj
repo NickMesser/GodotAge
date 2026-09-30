@@ -1,0 +1,20 @@
+<Project Sdk="Godot.NET.Sdk/4.7.2">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>AAEmu.GodotViewer</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Formula text of the game database (character stats). -->
+    <PackageReference Include="Jace" Version="1.0.0" />
+    <!-- Reads the client's game database (compact.sqlite3). -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Native Lua 5.1.1 (double+int64) that runs the client's x2ui scripts (Ui/Lua); must sit next to the assembly. -->
+    <None Include="Ui\Lua\native\lua51.dll" Link="lua51.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,28 @@
+# Godot / .NET build output and editor state
+.godot/
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Local settings: paths to your own client install and account (see README)
+godotage.cfg
+
+# Files taken from or generated out of the ArcheAge client. They stay on your machine and are never committed.
+# - patched/translated UI scripts and English texture replacements
+Ui/X2/Overrides/game/
+# - game text (source strings from the client database and scripts) with English translations
+Ui/X2/Translations/db_strings*.json
+Ui/X2/Translations/strings.json
+# - mouse cursors extracted from the client binaries
+Assets/Cursors/
+
+# Placeholder test model with no stated license
+Assets/Characters/SpaceBunny/
+
+# Client data must never be added
+game_pak
+*.sqlite3
+*.alb
