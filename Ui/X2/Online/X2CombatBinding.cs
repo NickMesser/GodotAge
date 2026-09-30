@@ -42,6 +42,12 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
     private readonly List<WeakReference<SlotWidget>> _slots = [];
     private readonly List<WeakReference<SlotWidget>> _abilitySlots = [];
     private readonly List<WeakReference<SlotWidget>> _petSlots = [];
+    private readonly List<WeakReference<SlotWidget>> _modeSlots = [];
+    private string _modeActionsKey = "";
+
+    /// <summary>ui_texts lookup (category, key) supplied by the UI layer, for native slot tooltips.</summary>
+    public Func<int, string, string?>? UiText { get; set; }
+
     private readonly Dictionary<SlotWidget, X2ActionSlots.Entry> _slotBindingEntries = [];
     private TimerAnchor? _globalCooldown;
     private OnlineSession? _session;
@@ -339,6 +345,8 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
         if (key == "gear_score") return GetUnitStatistics(token, false).GetValueOrDefault("gear_score");
         // shortcut skills are the special skill set some zones grant (client-driven dungeons, mounts), not the skill book
         if (key == "shortcut_skill_count") return 0;
+        // X2Unit:GetModeActionsCount: the vehicle mode bar (mount skills + dismount + slave info) while driving
+        if (key == "mode_actions_count" && Resolve(token) == _world.PlayerId) return _session.VehicleModeActions().Count;
         return 0;
     }
 
@@ -596,6 +604,7 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
         if (action.Type is X2ActionSlots.Kind.Skill or X2ActionSlots.Kind.RidePetSpell)
             return action.Id <= uint.MaxValue && _session.UseSkill((uint)action.Id);
         if (FindItem(action) is not { } item || _actions == null) return false;
+        if (_session.TryUseSummonSlaveItem(item)) return true;
         try
         {
             _actions.UseItem(new ItemSkillCast(_session.Entered.UnitId, item.ItemId, item.TemplateId,
@@ -646,6 +655,13 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
             RefreshPetSlot(slot);
             return;
         }
+        if (slot.SlotType == "246")
+        {
+            if (!_modeSlots.Any(reference => reference.TryGetTarget(out var target) && ReferenceEquals(target, slot)))
+                _modeSlots.Add(new WeakReference<SlotWidget>(slot));
+            RefreshModeSlot(slot);
+            return;
+        }
         if (slot.SlotType == "243")
         {
             if (!_abilitySlots.Any(reference => reference.TryGetTarget(out var target) && ReferenceEquals(target, slot)))
@@ -659,7 +675,91 @@ public sealed class X2CombatBinding : AAEmu.GodotViewer.Ui.X2.Scripting.Api.Null
         RefreshSlot(slot);
     }
 
-    private void OnVehicleUiStateChanged(GameEvent _) => RefreshPetSlots();
+    private void OnVehicleUiStateChanged(GameEvent _)
+    {
+        RefreshPetSlots();
+        var actions = _session?.VehicleModeActions() ?? [];
+        var key = string.Join(",", actions.Select(action => action.Type + action.SkillId + action.Function));
+        if (key == _modeActionsKey) return;
+        _modeActionsKey = key;
+        for (var i = _modeSlots.Count - 1; i >= 0; i--)
+        {
+            if (!_modeSlots[i].TryGetTarget(out var slot) || slot.Destroyed) _modeSlots.RemoveAt(i);
+            else RefreshModeSlot(slot);
+        }
+    }
+
+    private const int TooltipTextCategory = 33; // TOOLTIP_TEXT
+    private const string SlaveInfoIcon = "Game/ui/icon/icon_skill_info_view.dds";
+    private const uint UnbindSkillIcon = 35837; // the dismount function shows the "내리기" skill's icon
+
+    /// <summary>
+    /// ISLOT_MODE_ACTION (246) slots, as the original fills them while the player drives a slave (captured tooltips):
+    /// slave skills bind as "slave_skill" with a siege_weapon_skill tooltip; the dismount and slave-info entries bind as
+    /// "function" with { tootipText = TOOLTIP_TEXT unbind / showSlaveInfo }.
+    /// </summary>
+    private void RefreshModeSlot(SlotWidget slot)
+    {
+        var actions = _session?.VehicleModeActions() ?? [];
+        var index = checked((int)slot.SlotIndex) - 1;
+        var action = index >= 0 && index < actions.Count ? actions[index] : null;
+        slot.SetCount(0);
+        slot.SetCooldown(0, 0);
+        if (slot is not NativeSlotWidget native)
+        {
+            slot.SetIcon(null);
+            return;
+        }
+        if (action == null)
+        {
+            slot.SetIcon(null);
+            native.SetLiveBoundType(false);
+            native.SetTooltip(null);
+        }
+        else if (action.Type == "slave_skill")
+        {
+            var skill = _data?.GetSkill(action.SkillId);
+            slot.SetIcon(skill?.IconPath);
+            native.SetLiveBoundType("slave_skill");
+            native.SetTooltip(new LuaTable
+            {
+                ["tipType"] = "siege_weapon_skill", ["type"] = (double)action.SkillId,
+                ["name"] = skill?.Name ?? $"Skill {action.SkillId}",
+                ["description"] = skill?.Description ?? "", ["path"] = skill?.IconPath ?? "",
+                ["skillUsable"] = 1d, ["learnLevel"] = 1d, ["show"] = false,
+            });
+        }
+        else
+        {
+            slot.SetIcon(action.Function == "unbind" ? _data?.GetSkill(UnbindSkillIcon)?.IconPath : SlaveInfoIcon);
+            native.SetLiveBoundType("function");
+            native.SetTooltip(new LuaTable
+            {
+                ["tootipText"] = UiText?.Invoke(TooltipTextCategory, action.Function) ?? action.Function,
+            });
+        }
+        native.InvokeHandler("OnContentUpdated", "action_binded", action != null);
+        native.InvokeHandler("OnContentUpdated", "learned", action != null);
+        native.InvokeHandler("OnContentUpdated", "can_use", action != null);
+    }
+
+    /// <summary>A mode action slot was clicked or its hotkey (mode_action_bar_button) pressed.</summary>
+    public bool UseModeActionSlot(int slotIndex)
+    {
+        var actions = _session?.VehicleModeActions() ?? [];
+        if (_session == null || slotIndex < 1 || slotIndex > actions.Count) return false;
+        var action = actions[slotIndex - 1];
+        switch (action.Type, action.Function)
+        {
+            case ("function", "unbind"):
+                return _session.RequestVehicleUnmount();
+            case ("function", "showSlaveInfo"):
+                _events.Fire("SHOW_SLAVE_INFO"); // mode_action.lua toggles slaveInfoFrame on it
+                return true;
+            default:
+                return _session.UseVehicleSkill(action.SkillId);
+        }
+    }
 
     private void RefreshPetSlots()
     {

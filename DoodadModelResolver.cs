@@ -152,12 +152,14 @@ public sealed class DoodadModelResolver
                    'DoodadFuncNaviOpenMailbox',
                    'DoodadFuncCraftStart',
                    'DoodadFuncCraftPack',
-                   'DoodadFuncCraftOrderBoardUiOpen')
+                   'DoodadFuncCraftOrderBoardUiOpen',
+                   'DoodadFuncAttachment')
              ORDER BY CASE f.actual_func_type
                  WHEN 'DoodadFuncNaviOpenMailbox' THEN 0
                  WHEN 'DoodadFuncCraftOrderBoardUiOpen' THEN 1
                  WHEN 'DoodadFuncCraftStart' THEN 2
-                 ELSE 3 END,
+                 WHEN 'DoodadFuncCraftPack' THEN 3
+                 ELSE 4 END,
                  f.id
              LIMIT 1;
             """;

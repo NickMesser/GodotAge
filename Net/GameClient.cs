@@ -421,6 +421,32 @@ public sealed class GameClient : IAsyncDisposable, IDisposable
         Interlocked.Exchange(ref _lastMoveSentMs, _clock.ElapsedMilliseconds);
     }
 
+    /// <summary>
+    /// Sends a movement body the caller built (vehicle type 2, ship request type 5) and counts it as movement, so the idle
+    /// type 1 heartbeat stays quiet while the player drives: the real client sends only the vehicle stream when seated.
+    /// </summary>
+    public void SendVehicleMovement(CombatOutboundPacket packet)
+    {
+        SendGame(packet);
+        Interlocked.Exchange(ref _lastMoveSentMs, _clock.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// CSTeleportEnded (0x0F5) after an SCTeleportUnit has been applied: fixed-point X/Y s64, Z f32 and the character's
+    /// orientation quaternion (0, 0, sin(yaw/2), cos(yaw/2)). Real-client capture after a GM /move:
+    /// <c>0000000000 38d803 000000000070c203 2433cd42 00000000 00000000 534858bf 9af5083f</c> (yaw -115.3°).
+    /// World (AAEmu CSTeleportEndedPacket) only clears the post-teleport movement lock on this packet; until then it
+    /// drops every CSMoveUnit silently, the vehicle stream included.
+    /// </summary>
+    public void SendTeleportEnded(Vector3 position, float yaw)
+    {
+        SendGame(0x0F5, new WireWriter()
+            .S64(((long)(position.X * 4096f)) << 32).S64(((long)(position.Y * 4096f)) << 32).F32(position.Z)
+            .F32(0).F32(0).F32(MathF.Sin(yaw / 2)).F32(MathF.Cos(yaw / 2)));
+        OwnPosition = position;
+        OwnYaw = yaw;
+    }
+
     /// <summary>Returns idle heartbeats to the player after server-confirmed detachment from a controlled unit.</summary>
     public void ResetMovementHeartbeat(Vector3 position, float yaw)
     {
@@ -804,6 +830,12 @@ public sealed class GameClient : IAsyncDisposable, IDisposable
                 break;
             case Opcodes.SCDoodadsRemoved:
                 Emit(new UnitsRemovedEvent(PacketParsers.ParseDoodadsRemoved(body), true));
+                break;
+            case Opcodes.SCDoodadCreated:
+                Emit(new UnitAppearedEvent(PacketParsers.ParseDoodadCreated(body)));
+                break;
+            case Opcodes.SCDoodadRemoved:
+                Emit(new UnitsRemovedEvent([PacketParsers.ParseDoodadRemoved(body)], true));
                 break;
             case Opcodes.SCUnitPoints:
             {

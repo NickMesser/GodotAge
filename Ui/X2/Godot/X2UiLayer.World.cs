@@ -517,7 +517,9 @@ public partial class X2UiLayer
                 root.SlotActivated = slot =>
                 {
                     if (slot.SlotType is "254" or "action") _combatBinding.UseActionSlot((int)slot.SlotIndex);
+                    else if (slot.SlotType == "246") _combatBinding.UseModeActionSlot((int)slot.SlotIndex);
                 };
+                _combatBinding.UiText = (category, key) => _texts?.Get(category, key);
                 root.SlotDropped = (source, destination) => _combatBinding.DropSlot(source, destination);
             }
             X2WorldApis.Install(host, context, family);

@@ -31,6 +31,7 @@ public partial class OnlineSession
     {
         TargetKind.Npc => BeginNpcInteraction(target, pickedWithRightMouse),
         TargetKind.Doodad => BeginDoodadInteraction(target),
+        TargetKind.Vehicle => BeginVehicleInteraction(target),
         _ => false,
     };
 

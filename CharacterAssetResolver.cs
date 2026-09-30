@@ -408,6 +408,24 @@ public sealed class CharacterAssetResolver
     /// A unit as the client sees it: model id, equipment/body-image slots (enum_equip_slot id -> item template id,
     /// as in SCUnitState / the character's equipment container) and appearance (null = none).
     /// </summary>
+    /// <summary>
+    /// A bare skinned model file as a prefab entity names it (e.g. the farm wagon's AnimObject
+    /// <c>transfers_trailer_a_body.chr</c>): the file is its own skeleton and only part, its .cal supplies the clips.
+    /// </summary>
+    public CharacterAssets ResolveModelFile(string chrPath)
+    {
+        var a = new CharacterAssets { Kind = "actor", ModelFile = chrPath, SkeletonPath = chrPath };
+        if (chrPath.Length == 0 || !_exists(chrPath))
+        {
+            a.Warnings.Add($"model file '{chrPath}' missing");
+            return a;
+        }
+        a.Parts.Add(new CharacterPart { Slot = "base", ModelPath = chrPath, IsSkinned = true, Source = "model chr" });
+        var cal = chrPath[..^4] + ".cal";
+        a.AnimationListPath = _exists(cal) ? cal : "";
+        return a;
+    }
+
     public CharacterAssets ResolveUnit(long modelId, IReadOnlyDictionary<int, long> equipment, UnitAppearance appearance)
     {
         var a = new CharacterAssets { ModelId = modelId };

@@ -55,7 +55,7 @@ public sealed record X2InstancePoint(string Name, double Value, double Maximum =
 public sealed record X2VehicleState(uint UnitId, string Name, bool IsShip, double Speed,
     double TurnSpeed, double Hp = 0, double MaxHp = 0, int CustomizingType = 0,
     uint TemplateId = 0, string Kind = "", int Gear = 0, bool Handbrake = false,
-    bool TractionControl = false, double X = 0, double Y = 0, double Z = 0);
+    bool TractionControl = false, double X = 0, double Y = 0, double Z = 0, bool HasVehicleInfo = false);
 
 /// <summary>
 /// A recursively typed API table. Values may be null, string, bool, a numeric primitive, another X2ApiTable,
@@ -307,9 +307,12 @@ public static class X2WorldApi
 
             case "X2SiegeWeapon.GetSiegeWeaponSpeed": return data.CurrentVehicle?.Speed ?? 0;
             case "X2SiegeWeapon.GetSiegeWeaponTurnSpeed": return data.CurrentVehicle?.TurnSpeed ?? 0;
-            case "X2SiegeWeapon.GetSlaveCustomizingType": return (double)(data.CurrentVehicle?.CustomizingType ?? 0);
+            // nil for slaves without customizing (the real client returned nil for the farm wagon; slave_info hides the button)
+            case "X2SiegeWeapon.GetSlaveCustomizingType": return data.CurrentVehicle is { CustomizingType: > 0 } custom
+                ? (object)(double)custom.CustomizingType : null;
             case "X2SiegeWeapon.IsSlaveShip": return data.CurrentVehicle?.IsShip ?? false;
-            case "X2SiegeWeapon.GetVehicleInfo": return data.CurrentVehicle is { IsShip: false } v ? Vehicle(v) : null;
+            // gear/handbrake/traction rows exist only for wheeled-simulation vehicles (nil for the farm wagon, captured)
+            case "X2SiegeWeapon.GetVehicleInfo": return data.CurrentVehicle is { IsShip: false, HasVehicleInfo: true } v ? Vehicle(v) : null;
             case "X2SiegeWeapon.GetShipInfo": return data.CurrentVehicle is { IsShip: true } ship ? Vehicle(ship) : null;
             case "X2SiegeWeapon.GetMountedSiegeWeaponInfo": return data.CurrentVehicle is { } mounted ? Vehicle(mounted) : null;
             case "X2Interaction.GetInteractionSkillIconPath": return data.InteractionSkillIconPath;

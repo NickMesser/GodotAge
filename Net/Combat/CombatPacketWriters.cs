@@ -76,6 +76,34 @@ public static class CombatPacketWriters
             .U8(NoSkillObject).U8(NoInputDirection)
             .ToPacket(CombatOpcodes.CSStartSkill);
 
+    /// <summary>
+    /// CSStartSkill for an item caster aimed at a position (summon_pos skills such as the slave summon scroll skill
+    /// 15802). Byte-for-byte the real client's layout (capture 2026-09-29, farm wagon scroll): skill u32, caster type 2,
+    /// player bc, item u64, item template u32, type1 u8, type2 u64, target type 1, fixed-point X/Y s64, Z f32,
+    /// rotation f32, three zero bc ids, skill-object flags u8, input direction u8.
+    /// </summary>
+    public static CombatOutboundPacket StartItemSkillOnPosition(uint skillId, uint casterUnitId, ulong itemId,
+        uint itemTemplateId, byte type1, ulong type2, Vector3 position, float rotation) =>
+        new WireWriter().U32(skillId).U8(2).Bc(casterUnitId).U64(itemId).U32(itemTemplateId).U8(type1).U64(type2)
+            .U8(PositionTarget)
+            .S64(ToSkillPositionX(position.X)).S64(ToSkillPositionY(position.Y))
+            .F32(position.Z).F32(rotation)
+            .Bc(0).Bc(0).Bc(0)
+            .U8(NoSkillObject).U8(NoInputDirection)
+            .ToPacket(CombatOpcodes.CSStartSkill);
+
+    /// <summary>
+    /// CSStartSkill cast by a mount (a slave's mode-bar skill): caster type 3 (AAEmu SkillCasterMount) = the slave's
+    /// <c>bc</c> plus the <c>mount_skills.id</c> u32, then a unit target. The real client's farm-wagon horn (skill 15622,
+    /// mount skill 65) reached World as caster 902 / target 902 with the relayed caster bytes <c>03 860300 41000000</c>
+    /// (18-byte CS body, capture 2026-09-30).
+    /// </summary>
+    public static CombatOutboundPacket StartMountSkillOnUnit(uint skillId, uint mountUnitId, uint mountSkillId, uint targetUnitId) =>
+        new WireWriter().U32(skillId).U8(3).Bc(mountUnitId).U32(mountSkillId)
+            .U8(UnitTarget).Bc(targetUnitId)
+            .U8(NoSkillObject).U8(NoInputDirection)
+            .ToPacket(CombatOpcodes.CSStartSkill);
+
     /// <summary>CSStopCasting: timeline id, plot timeline id, then the owning character's <c>bc</c> id.</summary>
     public static CombatOutboundPacket StopCasting(ushort timelineId, ushort plotTimelineId, uint casterUnitId) =>
         Packet(CombatOpcodes.CSStopCasting,

@@ -324,6 +324,21 @@ public static class PacketParsers
 
     // ---------------------------------------------------------------- doodads
 
+    /// <summary>
+    /// SCDoodadCreated (0x14E): one Doodad.Write body. The server sends this for doodads bound to a slave (a rowboat's
+    /// helm, seat and lantern, a farm wagon's backpack boxes), whose position is relative to the parent slave.
+    /// </summary>
+    public static UnitSnapshot ParseDoodadCreated(byte[] body)
+    {
+        var list = new List<UnitSnapshot>();
+        var r = new WireReader(body);
+        ReadDoodad(r, body, list);
+        return list[0];
+    }
+
+    /// <summary>SCDoodadRemoved (0x14F): bc id, bool (false deletes the doodad).</summary>
+    public static uint ParseDoodadRemoved(byte[] body) => new WireReader(body).Bc();
+
     /// <summary>SCDoodadsCreated (0x154): u8 count, then Doodad.Write per doodad.</summary>
     public static List<UnitSnapshot> ParseDoodadsCreated(byte[] body)
     {
@@ -331,6 +346,12 @@ public static class PacketParsers
         var list = new List<UnitSnapshot>();
         var count = r.U8();
         for (var i = 0; i < count; i++)
+            ReadDoodad(r, body, list);
+        return list;
+    }
+
+    private static void ReadDoodad(WireReader r, byte[] body, List<UnitSnapshot> list)
+    {
         {
             var start = r.Pos;
             var id = r.Bc();
@@ -369,7 +390,6 @@ public static class PacketParsers
                 AttachPoint = (sbyte)attach,
             });
         }
-        return list;
     }
 
     /// <summary>SCDoodadsRemoved (0x155): u16 count, bool last, then (bc id, bool) per doodad.</summary>
@@ -447,24 +467,30 @@ public static class PacketParsers
                 var pos = r.Position();
                 short vx = r.S16(), vy = r.S16(), vz = r.S16();
                 short qx = r.S16(), qy = r.S16(), qz = r.S16();
-                r.F32(); r.F32(); r.F32(); // angular velocity
+                var angular = new Vector3(r.F32(), r.F32(), r.F32());
+                var steering = 0f;
                 if (kind == MoveKind.Ship)
                 {
                     r.S8(); r.S8(); r.U8(); r.U16(); r.Bool(); // steering, throttle, rpm, zone, stuck
                 }
                 else
                 {
-                    r.F32(); r.U8(); // steering, throttle
+                    steering = r.F32();
+                    r.U8(); // throttle
                     var wheels = r.U8();
                     for (var i = 0; i < wheels; i++)
                         r.F32();
                 }
-                var scale = kind == MoveKind.Ship ? 30f : WorldCoords.VelocityFullScale;
+                // Both bodies quantize velocity against 30 m/s: the real client's farm wagon cruising at a measured
+                // 4.0 m/s (0.44 m per 110 ms packet) reports vel.y = 4369 = 4.0 * 32767 / 30.
+                const float scale = 30f;
                 return new UnitMovement
                 {
                     UnitId = unitId, Kind = kind, Time = time, Flags = flags, Position = pos,
                     Velocity = new Vector3(vx, vy, vz) * (scale / short.MaxValue),
                     Yaw = WorldCoords.YawFromShortQuaternion(qx, qy, qz),
+                    Rotation = WorldCoords.QuaternionFromShorts(qx, qy, qz),
+                    AngularVelocity = angular, Steering = steering,
                 };
             }
             case MoveKind.ShipRequest:

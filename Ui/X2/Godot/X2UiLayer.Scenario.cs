@@ -131,13 +131,17 @@ public partial class X2UiLayer
                 break;
             case "hold":
             {
-                // hold <Key> <seconds>: keeps a key down (movement), releasing it after the time
+                // hold <Key>[+Key...] <seconds>: keeps keys down (movement, W+D to drive a curve), releasing them after the time
                 var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                var key = ParseKey(parts[0]);
+                var keys = parts[0].Split('+', StringSplitOptions.RemoveEmptyEntries).Select(ParseKey).ToArray();
                 var seconds = parts.Length > 1 ? double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) : 1;
-                Input.ParseInputEvent(new InputEventKey { Keycode = key, PhysicalKeycode = key, Pressed = true });
+                foreach (var key in keys)
+                    Input.ParseInputEvent(new InputEventKey { Keycode = key, PhysicalKeycode = key, Pressed = true });
                 GetTree().CreateTimer(seconds).Timeout += () =>
-                    Input.ParseInputEvent(new InputEventKey { Keycode = key, PhysicalKeycode = key, Pressed = false });
+                {
+                    foreach (var key in keys)
+                        Input.ParseInputEvent(new InputEventKey { Keycode = key, PhysicalKeycode = key, Pressed = false });
+                };
                 _scenarioWaitUntil = _scenarioClock + seconds + 0.2;
                 break;
             }
@@ -339,6 +343,74 @@ public partial class X2UiLayer
                 _unitsTraceNext = 0;
                 break;
             }
+            case "ensureslave":
+            {
+                // ensureslave <item template>: uses the summon item through X2Bag:UseItemByType only when no own slave is out
+                if (LiveSession?.MateSlaveState.MySlavesByObjectId.Count > 0) { Emit("[x2 scenario] ensureslave: a slave is out"); break; }
+                var template = uint.Parse(arg, System.Globalization.CultureInfo.InvariantCulture);
+                var used = _protocolItemsData?.SendItemsCommand(new Scripting.Api.X2ItemsCommand("X2Bag", "UseItemByType", [(double)template])) == true;
+                Emit($"[x2 scenario] ensureslave {template}: {(used ? "sent" : "refused")}");
+                break;
+            }
+            case "destroyitem":
+            {
+                // destroyitem <item id>: CSDestroyItem for a bag item (test clean-up)
+                var itemId = ulong.Parse(arg, System.Globalization.CultureInfo.InvariantCulture);
+                var entry = LiveSession?.InventoryState.Items.FirstOrDefault(p => p.Value?.ItemId == itemId);
+                if (entry is not { Value: { } item } found || _protocolActions == null) { Emit($"[x2 scenario] no item {itemId}"); break; }
+                _protocolActions.DestroyItem(itemId, found.Key.SlotType, (byte)found.Key.Slot, (uint)Math.Max(1, item.Count));
+                Emit($"[x2 scenario] destroy item {itemId} (template {item.TemplateId}) at {found.Key.SlotType}:{found.Key.Slot}");
+                break;
+            }
+            case "useitem":
+            {
+                // useitem <template>: X2Bag:UseItemByType, the bag API the action bar and quick-use buttons call
+                var template = uint.Parse(arg, System.Globalization.CultureInfo.InvariantCulture);
+                var used = _protocolItemsData?.SendItemsCommand(new Scripting.Api.X2ItemsCommand("X2Bag", "UseItemByType", [(double)template])) == true;
+                Emit($"[x2 scenario] use item {template}: {(used ? "sent" : "refused")}");
+                break;
+            }
+            case "targetslave":
+            {
+                // targetslave: selects the nearest slave (vehicle / ship), as clicking it would
+                var me = Bridge?.Get(Bridge.PlayerId);
+                var slave = Bridge?.All.Where(u => u.Type == "slave")
+                    .OrderBy(u => me == null ? 0 : (u.X - me.X) * (u.X - me.X) + (u.Y - me.Y) * (u.Y - me.Y)).FirstOrDefault();
+                if (slave == null) { Emit("[x2 scenario] no slave in sight"); break; }
+                Emit($"[x2 scenario] targeting slave {slave.Name} ({slave.Id})");
+                Bridge!.RequestTarget(slave.Id);
+                break;
+            }
+            case "water":
+            {
+                // water <x> <y>: logs the terrain and water surface the viewer has at that point
+                var v = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(t => float.Parse(t, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                Emit($"[x2 scenario] water {LiveSession?.WaterProbe(v[0], v[1]) ?? "no session"}");
+                break;
+            }
+            case "burst":
+            {
+                // burst <count> <seconds between> <name>: saves a frame sequence in the background while later steps run
+                var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var count = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+                var every = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+                var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(_scenarioFile!)) ?? ".";
+                for (var i = 0; i < count; i++)
+                {
+                    var file = System.IO.Path.Combine(dir, $"{parts[2]}_{i:D2}.png");
+                    GetTree().CreateTimer(every * i).Timeout += () => GetViewport().GetTexture().GetImage().SavePng(file);
+                }
+                break;
+            }
+            case "vehicle":
+                // vehicle: logs the player's seat, the driven vehicle's simulation and the live slaves
+                Emit($"[x2 scenario] vehicle: {LiveSession?.VehicleDebug() ?? "no session"}");
+                break;
+            case "modeaction":
+                // modeaction <n>: uses mode action bar slot n the way a click on it does
+                Emit($"[x2 scenario] mode action {arg}: {(_combatBinding?.UseModeActionSlot(int.Parse(arg, System.Globalization.CultureInfo.InvariantCulture)) == true ? "used" : "refused")}");
+                break;
             case "usedoodad":
             {
                 // usedoodad <template id>: right-click interaction with the nearest doodad of that template (no target selection;

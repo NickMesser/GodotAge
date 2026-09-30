@@ -41,6 +41,8 @@ public partial class PlayerController : Node3D
     public int TransitionId { get; private set; }
     public NVector3 TransitionPosition { get; private set; }
     public sbyte ForwardInput { get; private set; }
+    /// <summary>While mounted: the A/D axis, +1 turning left (A), -1 turning right (D), for vehicle steering.</summary>
+    public float TurnInput { get; private set; }
     public sbyte StrafeInput { get; private set; }
     public sbyte VerticalInput { get; private set; }
     public bool HasMovementInput { get; private set; }
@@ -158,6 +160,7 @@ public partial class PlayerController : Node3D
             var mountedForward = bothMouseButtons ? 1f : Axis("x2_moveback", Key.S, "x2_moveforward", Key.W);
             var mountedStrafe = bothMouseButtons ? 0f : Axis("x2_moveleft", Key.Q, "x2_moveright", Key.E);
             var mountedTurn = rightSteering || bothMouseButtons ? 0f : Axis("x2_turnright", Key.D, "x2_turnleft", Key.A);
+            TurnInput = bothMouseButtons ? 0f : Axis("x2_turnright", Key.D, "x2_turnleft", Key.A);
             if (rightSteering || bothMouseButtons)
                 Heading = CameraYaw;
             else

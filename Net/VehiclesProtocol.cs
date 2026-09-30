@@ -16,6 +16,13 @@ public sealed record SlaveCreatedBody(
 public sealed record SlaveRemovedBody(uint OwnerObjectId, short TimelineId);
 public sealed record SlaveDespawnBody(uint SlaveObjectId, bool Success);
 public sealed record SlaveBoundBody(ulong MasterId, sbyte MasterWorldId, uint SlaveObjectId);
+/// <summary>
+/// SCUpdatedSlaveSourceItem (0x296): the summoning item of the owner's active slave and that slave's health. The original
+/// client uses it to turn the next use of the same item into CSDespawnSlave (captured 2026-09-29: using the farm-wagon
+/// scroll while its wagon was out sent <c>5c00 860300</c>, not another summon).
+/// </summary>
+public sealed record SlaveSourceItemBody(uint OwnerObjectId, ulong ItemId, uint Health, byte Field4);
+
 public sealed record SlaveEscapedBody(uint SlaveObjectId, long PositionX, long PositionY, float PositionZ, float Rotation);
 
 public sealed record SlaveStateBody(
@@ -95,6 +102,7 @@ public sealed record SlaveBoundEvent(SlaveBoundBody Body) : GameEvent, IVehicleP
 public sealed record SlaveStateEvent(SlaveStateBody Body) : GameEvent, IVehicleProtocolEvent;
 public sealed record MySlaveEvent(MySlaveBody Body) : GameEvent, IVehicleProtocolEvent;
 public sealed record SlaveEscapedEvent(SlaveEscapedBody Body) : GameEvent, IVehicleProtocolEvent;
+public sealed record SlaveSourceItemEvent(SlaveSourceItemBody Body) : GameEvent, IVehicleProtocolEvent;
 public sealed record SlaveEquipmentChangedEvent(SlaveEquipmentChangedBody Body) : GameEvent, IVehicleProtocolEvent;
 public sealed record SlaveEquipmentExpiredEvent(SlaveEquipmentExpiredBody Body) : GameEvent, IVehicleProtocolEvent;
 public sealed record SlaveEquipmentFlagsChangedEvent(SlaveEquipmentFlagsChangedBody Body) : GameEvent, IVehicleProtocolEvent;
@@ -122,6 +130,7 @@ public static class VehiclesProtocol
     public const ushort SCMateEquipmentFlagsChanged = 0x16D;
     public const ushort SCSlaveState = 0x21B;
     public const ushort SCMateState = 0x21C;
+    public const ushort SCUpdatedSlaveSourceItem = 0x296;
 
     private const int CreatorNameMaxBytes = 0x80;
     private const int SlaveNameMaxBytes = 0x400;
@@ -148,6 +157,7 @@ public static class VehiclesProtocol
                 new SlaveEquipmentFlagsChangedBody(r.S16(), r.S8(), r.S8(), r.S8())),
             SCSlaveState => new SlaveStateEvent(ReadSlaveState(r)),
             SCMateSpawned => new MateSpawnedEvent(ReadMateSpawned(r)),
+            SCUpdatedSlaveSourceItem => new SlaveSourceItemEvent(new SlaveSourceItemBody(r.Bc(), r.U64(), r.U32(), r.U8())),
             SCMateState => new MateStateEvent(ReadMateState(r)),
             SCMateEquipmentChanged => new MateEquipmentChangedEvent(ReadMateEquipmentChanged(r)),
             SCMateEquipmentExpired => new MateEquipmentExpiredEvent(
@@ -288,6 +298,7 @@ public sealed class VehiclePacketParserFamily : IPacketParserFamily
         VehiclesProtocol.SCMateEquipmentExpired,
         VehiclesProtocol.SCMateEquipmentFlagsChanged,
         VehiclesProtocol.SCMateState,
+        VehiclesProtocol.SCUpdatedSlaveSourceItem,
     ];
 
     public bool TryParse(ushort opcode, byte[] body, out IReadOnlyList<GameEvent> events)
@@ -340,6 +351,10 @@ public sealed class MateSlaveState
     private readonly Dictionary<uint, Vector3> _positions = [];
     private readonly Dictionary<short, Dictionary<int, ItemSnapshot>> _slaveEquipment = [];
     private readonly Dictionary<short, Dictionary<int, ItemSnapshot>> _mateEquipment = [];
+    private readonly Dictionary<uint, SlaveSourceItemBody> _sourceItems = [];
+
+    /// <summary>Latest SCUpdatedSlaveSourceItem per owner object id (the item that summoned that owner's active slave).</summary>
+    public SlaveSourceItemBody? SourceItem(uint ownerObjectId) => _sourceItems.GetValueOrDefault(ownerObjectId);
 
     public IReadOnlyDictionary<uint, MateSlaveUnitView> Units => Copy(_units);
     public IReadOnlyDictionary<uint, MySlaveBody> MySlavesByObjectId => Copy(_mySlavesByObjectId);
@@ -372,6 +387,7 @@ public sealed class MateSlaveState
         _positions.Clear();
         _slaveEquipment.Clear();
         _mateEquipment.Clear();
+        _sourceItems.Clear();
         SlaveEquipmentByTimelineId = Empty<short, SlaveEquipmentChangedBody>();
         MateEquipmentByTimelineId = Empty<short, MateEquipmentChangedBody>();
         LastSlaveEquipmentExpired = null;
@@ -401,8 +417,12 @@ public sealed class MateSlaveState
             case SlaveCreatedEvent created:
                 _slaveCreated[created.Body.SlaveObjectId] = created.Body;
                 break;
+            case SlaveSourceItemEvent source:
+                _sourceItems[source.Body.OwnerObjectId] = source.Body;
+                break;
             case SlaveRemovedEvent removed:
                 RemoveSlaveTimeline(removed.Body.OwnerObjectId, removed.Body.TimelineId);
+                _sourceItems.Remove(removed.Body.OwnerObjectId);
                 break;
             case SlaveDespawnEvent despawned when despawned.Body.Success:
                 RemoveObject(despawned.Body.SlaveObjectId);

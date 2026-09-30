@@ -76,6 +76,8 @@ public sealed class X2ProtocolItemsData : NullItemsData
         };
         if ((int)kind < 0) return false;
         var slot = slotIndex + 1;
+        if (System.Environment.GetEnvironmentVariable("X2_TRACE_ITEMS") == "1")
+            Godot.GD.Print($"[items] native slot {slotType}:{slotIndex} {interaction}");
         if (interaction == "Cancel") { ClearPickedCursor(); return true; }
         if (interaction == "Use")
             return SendItemsCommand(new X2ItemsCommand(kind == X2ContainerKind.Bag ? "X2Bag" : "X2Bank", "HandleUse", [slot]));
@@ -579,6 +581,11 @@ public sealed class X2ProtocolItemsData : NullItemsData
 
     private bool UseItem(OnlineSession session, ItemSnapshot item)
     {
+        if (System.Environment.GetEnvironmentVariable("X2_TRACE_ITEMS") == "1")
+            Godot.GD.Print($"[items] use item {item.TemplateId}/{item.ItemId}");
+        // Slave summon scrolls cast their summon_pos skill ahead of the character, or despawn the slave they summoned.
+        if (session.TryUseSummonSlaveItem(item))
+            return true;
         var actions = _actionsAccessor();
         if (actions is null)
             return false;

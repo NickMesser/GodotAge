@@ -61,6 +61,23 @@ public static class WorldCoords
     public static short VelocityToWire(float metresPerSecond) =>
         (short)Math.Clamp(MathF.Round(metresPerSecond * (short.MaxValue / VelocityFullScale)), short.MinValue, short.MaxValue);
 
+    /// <summary>Quaternion from its x, y, z parts scaled by 32767 (w implied, non-negative), Cry axes.</summary>
+    public static Quaternion QuaternionFromShorts(short qx, short qy, short qz)
+    {
+        float x = qx / 32767f, y = qy / 32767f, z = qz / 32767f;
+        var n = x * x + y * y + z * z;
+        return new Quaternion(x, y, z, n < 1f ? MathF.Sqrt(1f - n) : 0f);
+    }
+
+    /// <summary>The three short parts of a unit quaternion the way the client writes them (w made non-negative).</summary>
+    public static (short X, short Y, short Z) QuaternionToShorts(Quaternion q)
+    {
+        q = Quaternion.Normalize(q);
+        if (q.W < 0) q = new Quaternion(-q.X, -q.Y, -q.Z, -q.W);
+        static short S(float v) => (short)Math.Clamp(MathF.Round(v * 32767f), -32767, 32767);
+        return (S(q.X), S(q.Y), S(q.Z));
+    }
+
     /// <summary>Yaw (radians about +Z) from a quaternion given as its x, y, z parts scaled by 32767 (w implied).</summary>
     public static float YawFromShortQuaternion(short qx, short qy, short qz)
     {

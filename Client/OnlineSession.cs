@@ -40,6 +40,10 @@ public partial class OnlineSession : Node3D
         public bool Grounded = true;
         public bool Flying;
         public bool Attached;
+        /// <summary>Vehicles and ships: the full reported orientation (Godot axes), slerped towards like the position.</summary>
+        public Quaternion? TargetRotation;
+        /// <summary>The local driver simulates this vehicle; its server echo must not pull the node back.</summary>
+        public bool LocallyDriven;
         public float RunSpeed;
         public float ObservedRunSpeed;
         public ulong LandPoseEndsAt;
@@ -56,8 +60,8 @@ public partial class OnlineSession : Node3D
     private readonly BlockingCollection<Action> _doodadWork = new();
     // Doodad worker thread only: resolved models per template/phase (a prefab can have several parts).
     private readonly Dictionary<(uint, uint), List<(MeshRef Mesh, Transform3D Transform)>> _doodadParts = [];
-    // Doodad worker thread only: normal-state slave hull parts by slave template id.
-    private readonly Dictionary<uint, List<(MeshRef Mesh, Transform3D Transform)>> _slaveParts = [];
+    // Doodad worker thread only: normal-state slave visuals (static parts, skinned bodies, seats) by slave template id.
+    private readonly Dictionary<uint, SlaveVisual> _slaveParts = [];
     private double _sinceLastMove;
     private bool _wasMoving;
     private float _lastSentHeading = float.NaN;
@@ -143,11 +147,14 @@ public partial class OnlineSession : Node3D
         var blend = 1f - MathF.Exp(-(float)delta * 10f);
         foreach (var unit in _units.Values)
         {
-            if (unit.Node == null || unit.Attached)
+            if (unit.Node == null || unit.Attached || unit.LocallyDriven)
                 continue;
             var target = World.ToGodot(unit.Target.X, unit.Target.Y, unit.Target.Z);
             unit.Node.Position = unit.Node.Position.Lerp(target, blend);
-            unit.Node.Rotation = new Vector3(0, Mathf.LerpAngle(unit.Node.Rotation.Y, unit.TargetYaw, blend), 0);
+            if (unit.TargetRotation is { } rotation)
+                unit.Node.Quaternion = unit.Node.Quaternion.Normalized().Slerp(rotation, blend);
+            else
+                unit.Node.Rotation = new Vector3(0, Mathf.LerpAngle(unit.Node.Rotation.Y, unit.TargetYaw, blend), 0);
             if (unit.Character != null)
             {
                 unit.Character.Speed = new Vector2(unit.Velocity.X, unit.Velocity.Y).Length();
@@ -174,6 +181,8 @@ public partial class OnlineSession : Node3D
     {
         // Report our own movement like the real client: a packet per ~100 ms while moving, one stop packet after.
         _sinceLastMove += delta;
+        if (DriveVehicle(delta))
+            return;
         if (_controlledMountUnitId != 0 && _units.TryGetValue(_controlledMountUnitId, out var mount))
         {
             var mountedMoving = Player.ForwardInput != 0;
@@ -320,8 +329,19 @@ public partial class OnlineSession : Node3D
                 Spawn(appeared.Unit);
                 break;
             case UnitMovedEvent moved when moved.Movement.UnitId != Entered.UnitId && _units.TryGetValue(moved.Movement.UnitId, out var unit):
-                if (!moved.Movement.HasPosition)
-                    break;
+                if (TraceVehicles && unit.LocallyDriven && moved.Movement.HasPosition && Time.GetTicksMsec() >= _nextEchoLog)
+                {
+                    _nextEchoLog = Time.GetTicksMsec() + 1000;
+                    GD.Print($"[vehicle] server copy of driven {moved.Movement.UnitId}: {moved.Movement.Kind} at " +
+                             $"({moved.Movement.Position.X:F1}, {moved.Movement.Position.Y:F1}, {moved.Movement.Position.Z:F1})");
+                }
+                if (!moved.Movement.HasPosition || unit.LocallyDriven)
+                    break; // the driver's own client authored this vehicle position; the server only echoes it
+                if (moved.Movement.Kind is MoveKind.Vehicle or MoveKind.Vehicle3 or MoveKind.Ship)
+                {
+                    var q = moved.Movement.Rotation;
+                    unit.TargetRotation = new Quaternion(q.X, q.Z, -q.Y, q.W).Normalized(); // Cry (x, y, z) -> Godot (x, z, -y)
+                }
                 if (moved.Movement.HasPosition)
                     unit.Target = moved.Movement.Position;
                 unit.TargetYaw = moved.Movement.Yaw;
@@ -351,12 +371,20 @@ public partial class OnlineSession : Node3D
                 }
                 break;
             case UnitAttachedEvent attached:
-                if (attached.ChildUnitId == Entered.UnitId) _playerAttachedUnitId = attached.ParentUnitId;
+                if (attached.ChildUnitId == Entered.UnitId)
+                {
+                    _playerAttachedUnitId = attached.ParentUnitId;
+                    _playerAttachPoint = attached.Point;
+                }
                 AttachUnit(attached);
                 VehicleUiStateChanged?.Invoke(attached);
                 break;
             case UnitDetachedEvent detached:
-                if (detached.ChildUnitId == Entered.UnitId) _playerAttachedUnitId = 0;
+                if (detached.ChildUnitId == Entered.UnitId)
+                {
+                    _playerAttachedUnitId = 0;
+                    _playerAttachPoint = 0xFF;
+                }
                 DetachUnit(detached.ChildUnitId);
                 VehicleUiStateChanged?.Invoke(detached);
                 break;
@@ -375,12 +403,19 @@ public partial class OnlineSession : Node3D
                     DetachChildren(id);
                     DetachUnit(id);
                     RemoveCombatUnit(id);
-                    if (_units.Remove(id, out var gone))
-                        gone.Node?.QueueFree();
+                    ForgetVehicle(id);
+                    if (_units.Remove(id, out var gone) && GodotObject.IsInstanceValid(gone.Node))
+                    {
+                        ReleaseParentedDoodads(gone);
+                        gone.Node.QueueFree();
+                    }
                 }
                 break;
             case TeleportedEvent teleported:
                 Player.Teleport(teleported.Position, Player.Heading);
+                // The real client answers every SCTeleportUnit with CSTeleportEnded; World keeps dropping movement
+                // (walking and the vehicle stream alike) until it arrives.
+                Client.SendTeleportEnded(teleported.Position, Player.Heading);
                 break;
             case ChatEvent chat when _chatLines++ < 200:
                 GD.Print($"[chat {chat.ChatType}] {chat.SenderName}: {chat.Message}");
@@ -428,7 +463,9 @@ public partial class OnlineSession : Node3D
         // Keep the server's parent relation (so the camera follows the hull), but do not attach a
         // player to an unrelated bone on a vehicle or ship.
         var boneName = attached.Point == 1 ? "bone_spine_driver" : "bone_spine_passenger";
-        if (parent.Snapshot.Kind != UnitKind.Slave &&
+        if (parent.Snapshot.Kind == UnitKind.Slave && SeatAnchor(parent, attached.Point) is { } seat)
+            attachmentParent = seat;
+        else if (parent.Snapshot.Kind != UnitKind.Slave &&
             parent.Node.FindChild("Skeleton", recursive: true, owned: false) is Skeleton3D skeleton && skeleton.FindBone(boneName) >= 0)
         {
             var bone = new BoneAttachment3D { Name = $"Rider_{attached.ChildUnitId}", BoneName = boneName };
@@ -448,11 +485,14 @@ public partial class OnlineSession : Node3D
             _controlledMountUnitId = attached.Point == 1 && parent.Snapshot.Kind == UnitKind.Mate
                 ? attached.ParentUnitId : 0;
         }
+        if (parent.Snapshot.Kind == UnitKind.Slave)
+            PlaySeatPose(attached.ChildUnitId, parent, attached.Point);
     }
 
     private void DetachUnit(uint childId)
     {
         _pendingAttachments.Remove(childId);
+        StopSeatPose(childId);
         if (!_attachments.Remove(childId, out var view) || !GodotObject.IsInstanceValid(view.Child) ||
             !GodotObject.IsInstanceValid(view.OriginalParent))
             return;
@@ -498,8 +538,11 @@ public partial class OnlineSession : Node3D
             DetachChildren(s.UnitId);
             DetachUnit(s.UnitId);
         }
-        if (_units.Remove(s.UnitId, out var old))
-            old.Node?.QueueFree(); // the look changed: rebuild
+        if (_units.Remove(s.UnitId, out var old) && GodotObject.IsInstanceValid(old.Node))
+        {
+            ReleaseParentedDoodads(old);
+            old.Node.QueueFree(); // the look changed: rebuild
+        }
 
         var unit = new RemoteUnit
         {
@@ -515,6 +558,9 @@ public partial class OnlineSession : Node3D
             Rotation = new Vector3(0, s.Yaw, 0),
         };
         AddChild(unit.Node);
+        if (s.Kind == UnitKind.Doodad && s.ParentUnitId != 0)
+            ParentDoodad(unit);
+        AdoptPendingDoodads(s.UnitId);
         ReplayPendingAttachments(s.UnitId);
         if (s.AttachedToUnitId != 0)
             Post(() => AttachUnit(new UnitAttachedEvent(s.UnitId, unchecked((byte)s.AttachedPoint), s.AttachedToUnitId, 0)));
@@ -626,48 +672,6 @@ public partial class OnlineSession : Node3D
     }
 
     /// <summary>
-    /// Resolves a slave template's normal vehicle or ship visual on the existing static-model worker. Slave model URIs
-    /// name either a prefab member or a direct CGF; attachments and equipment remain server-state work and are not
-    /// guessed here.
-    /// </summary>
-    private void QueueSlave(RemoteUnit unit)
-    {
-        var s = unit.Snapshot;
-        // Keep the prior visible fallback when the content row is incomplete or the hull uses an unsupported asset type.
-        var placeholder = new MeshInstance3D
-        {
-            Mesh = new CapsuleMesh { Radius = 0.3f, Height = 1.7f },
-            Position = new Vector3(0, 0.85f, 0),
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.8f, 0.4f, 0.3f) },
-        };
-        unit.Node.AddChild(placeholder);
-        if (s.TemplateId == 0 || !File.Exists(GameDatabasePath))
-        {
-            GD.PrintErr($"Slave {s.UnitId}: cannot resolve template {s.TemplateId} without the content database.");
-            return;
-        }
-
-        _doodadWork.Add(() =>
-        {
-            var parts = SlaveParts(s.TemplateId);
-            if (parts.Count == 0)
-                return;
-            var scale = s.Scale > 0 ? s.Scale : 1f;
-            Post(() =>
-            {
-                if (!_units.TryGetValue(s.UnitId, out var current) || current != unit)
-                    return;
-                placeholder.QueueFree();
-                var root = new Node3D { Name = "SlaveModel", Scale = Vector3.One * scale };
-                unit.Node.AddChild(root);
-                foreach (var (mesh, transform) in parts)
-                    if (Models.GetMesh(mesh) is { } godotMesh)
-                        root.AddChild(new MeshInstance3D { Mesh = godotMesh, Transform = transform, Layers = ModelLibrary.ObjectLayer });
-            });
-        });
-    }
-
-    /// <summary>
     /// Doodad worker thread. The meshes of a doodad template in a phase: one static model, or the parts of a prefab
     /// (workbenches, houses, crops ...), each with its transform relative to the doodad. Empty when nothing can be drawn.
     /// </summary>
@@ -693,61 +697,6 @@ public partial class OnlineSession : Node3D
             }
         }
         return _doodadParts[(templateId, phaseId)] = parts;
-    }
-
-    /// <summary>
-    /// Worker-thread-only normal-state hull resolution. Prefab parts are restricted to CGF because ModelLibrary is a
-    /// static CGF renderer; CGA and character assets are retained as resolver diagnostics instead of being misread.
-    /// </summary>
-    private List<(MeshRef Mesh, Transform3D Transform)> SlaveParts(uint slaveTemplateId)
-    {
-        if (_slaveParts.TryGetValue(slaveTemplateId, out var cached))
-            return cached;
-
-        var parts = new List<(MeshRef, Transform3D)>();
-        SlaveModelResolution visual;
-        try
-        {
-            visual = new SlaveModelResolver(GameDatabasePath).Resolve(slaveTemplateId);
-        }
-        catch (Exception e)
-        {
-            GD.PrintErr($"Slave template {slaveTemplateId}: {e.Message}");
-            return _slaveParts[slaveTemplateId] = parts;
-        }
-
-        foreach (var diagnostic in visual.Diagnostics)
-            GD.PrintErr($"Slave template {slaveTemplateId}: {diagnostic}");
-        if (!visual.IsRenderable)
-            return _slaveParts[slaveTemplateId] = parts;
-
-        if (visual.Kind == SlaveModelKind.Cgf)
-        {
-            if (Models.Request(visual.PakPath!, null, false) is { } mesh)
-                parts.Add((mesh, Transform3D.Identity));
-            return _slaveParts[slaveTemplateId] = parts;
-        }
-
-        var prefab = SlaveModelResolver.ResolvePrefab(visual, PakFiles.Read, out var prefabDiagnostic);
-        if (prefab is null)
-        {
-            GD.PrintErr($"Slave template {slaveTemplateId}: {prefabDiagnostic}");
-            return _slaveParts[slaveTemplateId] = parts;
-        }
-        foreach (var diagnostic in prefab.Diagnostics)
-            GD.PrintErr($"Slave template {slaveTemplateId}: {diagnostic}");
-        foreach (var part in prefab.Parts)
-        {
-            if (!part.ModelPath.EndsWith(".cgf", StringComparison.OrdinalIgnoreCase))
-            {
-                GD.PrintErr($"Slave template {slaveTemplateId}: prefab part '{part.ModelPath}' is not a supported CGF.");
-                continue;
-            }
-            var transform = CryAxes.FromRowVector(part.Transform, NVector3.Zero);
-            if (Models.Request(part.ModelPath, part.MaterialPath, transform.Basis.Determinant() < 0) is { } mesh)
-                parts.Add((mesh, transform));
-        }
-        return _slaveParts[slaveTemplateId] = parts;
     }
 
     private static bool SameLook(UnitSnapshot a, UnitSnapshot b) =>

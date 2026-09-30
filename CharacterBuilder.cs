@@ -66,6 +66,10 @@ internal sealed class CharacterBuilder : IDisposable
     public void BuildUnit(long modelId, Dictionary<int, long> equipment, UnitAppearance appearance, Action<CharacterNode> ready) =>
         _queue.Add(() => Build(_resolver.ResolveUnit(modelId, equipment, appearance), $"unit model {modelId}", ready));
 
+    /// <summary>A bare .chr (vehicle bodies are AnimObject entities in their prefab), with its own .cal clips.</summary>
+    public void BuildModel(string chrPath, Action<CharacterNode> ready) =>
+        _queue.Add(() => Build(_resolver.ResolveModelFile(chrPath), $"model file {chrPath}", ready));
+
     public void Dispose()
     {
         _queue.CompleteAdding();

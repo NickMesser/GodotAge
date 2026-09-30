@@ -61,6 +61,8 @@ public sealed class X2ProtocolBinding : IDisposable
         SnapshotVehicles();
     }
 
+    private uint _boundSlave;
+
     private X2VehicleUiProjection Vehicles() => new(_session.MateSlaveState, _session.Entered.UnitId,
         _session.Entered.CharacterId, _session.PlayerAttachedUnitId, _world?.TargetId ?? 0);
 
@@ -97,6 +99,19 @@ public sealed class X2ProtocolBinding : IDisposable
         foreach (var old in _mates.Where(pair => pair.Value.Exists && !nextMates.ContainsKey(pair.Key)))
             _events.Fire(X2UnitEvents.DismissPet, (double)old.Key);
         _mates = nextMates;
+
+        // The player took or left a slave's driver seat: the original fires MODE_ACTIONS_UPDATE (mode_action.lua then
+        // reads X2Unit:GetModeActionsCount) and SIEGEWEAPON_UNBOUND on leaving (it closes the slave info window).
+        var boundSlave = _session.VehicleModeActions().Count > 0 ? _session.PlayerAttachedUnitId : 0u;
+        if (boundSlave != _boundSlave)
+        {
+            if (_boundSlave != 0)
+                _events.Fire("SIEGEWEAPON_UNBOUND");
+            if (boundSlave != 0)
+                _events.Fire("SIEGEWEAPON_BOUND");
+            _boundSlave = boundSlave;
+            _events.Fire("MODE_ACTIONS_UPDATE");
+        }
 
         var nextSlaves = projection.OwnedSlaveUnitIds.ToHashSet();
         foreach (var slave in nextSlaves.Except(_slaves))

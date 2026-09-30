@@ -4,18 +4,43 @@
 
 Wire layouts below were checked against `X2Game.Net/src/X2Game.Protocol/Generated/PacketBodies.g.cs`,
 the AAEmu packet readers/writers under `AAEmu.Game/Core/Packets/{C2G,G2C}`, and the movement types
-under `AAEmu.Game/Models/Game/Units/Movements`. The native movement summary is also in
-`AAEmuResearch/PacketLayouts/README.md` (movement rows around lines 165–177) and
-`PacketLayouts/ship-simulation.md`.
+under `AAEmu.Game/Models/Game/Units/Movements`.
 
-The recorded capture set (`packets-*.jsonl`) contains 2,242 outbound `CSMoveUnit` records,
-all move type 1, each 41 bytes. It has no type 2 or 5 movement and no slave/mate action requests.
-The 93–125 ms cadence in `w3_movement/REPORT.md` is therefore evidence for captured type 1 only.
-The native research notes confirm that a driving client sends type 5 for ships, but do not recover
-the keyboard/controller-to-byte mapping or its cadence. Accordingly the writer accepts raw signed
-throttle and steering values from its caller. No new automatic key mapping, ship cadence, or vehicle
-physics is guessed or sent. Type 2 also requires a complete simulated pose and wheel state; this
-viewer currently has no matching vehicle physics simulation.
+On 2026-09-29/30 the real 10.0.2.13 client was driven against the local AAEmu stack (farm wagon, slave 60,
+scroll 18660; rowboat, slave 15, item 1199) and its packets were captured with the harness packet monitor.
+Everything the viewer now sends for vehicles reproduces those captures; one captured type 2 body was rebuilt
+byte-for-byte by `VehiclePacketWriters.MoveVehicle` from its decoded values.
+
+## The vehicle life cycle as the real client does it
+
+| Step | Real-client request (captured) | Server answer |
+| --- | --- | --- |
+| Use the summon scroll | `CSStartSkill` skill = the item's `use_skill_id` (15802, target type 12 summon_pos): caster type 2 (item: player bc, item id u64, template u32, 0 u8, 0 u64), target type 1 (fixed-point X/Y s64, Z f32, rotation f32, three zero bc), then two zero bytes. The point is `slaves.spawn_x_offset` ahead of the character (5.0 m for the wagon at the terrain height; 2.5 m for the rowboat at the water surface, offset 1.5) with rotation = heading + π/2 | `SCSkillStarted/Fired`, then `SCSlaveCreated`, `SCUnitState`, `SCSlaveState` (0x21B), `SCDoodadCreated` (0x14E, one per bound doodad, parent-local position), `SCMySlave`, `SCUpdatedSlaveSourceItem` (0x296) |
+| Use the same scroll while its slave is out | `CSDespawnSlave` (0x05C) with the slave bc - no skill cast | `SCSlaveDespawn`, `SCSlaveRemoved`, `SCDoodadRemoved` (0x14F) per doodad, `SCUnitsRemoved` |
+| Board a slave that has an interaction skill (wagon) | interaction key with the slave targeted, within the skill's max_range (nothing at 4.9 m, bound at 2.4 m): `CSBindSlave` (0x05E) tl u16 + skill s32 = 75, 12076 | `SCUnhung`, `SCUnitAttached` (point 1, reason 6), `SCSlaveBound` |
+| Board a ship (rowboat) | use of its helm doodad (template 2384, func `DoodadFuncAttachment`, func skill 14916): `CSStartSkill` 14916 on the doodad (AAEmu binds the driver seat). The real client's pick on the helm could not be reproduced by the harness; GodotAge's request was accepted live | as above |
+| Drive a land vehicle | `CSMoveUnit` type 2 for the slave, every 98-130 ms including idle, never type 1 for the player while seated | World relays to the zone, echoes `SCOneUnitMovement` |
+| Mode-bar skill (horn) | `CSStartSkill` 15622 with caster type 3 (mount: slave bc + `mount_skills.id` u32 = 65) and the slave as unit target (18-byte body) | World: caster 902, target 902 |
+| Dismount | the mode bar's dismount function: `CSStartSkill` 35837 (`내리기`, target type parent) from the player (unit caster) on the slave: `fd8b0000 00 830300 00 860300 00 00` | `SCUnitDetached` (reason 5), `SCUnhung`, skill fired/ended |
+| After any `SCTeleportUnit` | `CSTeleportEnded` (0x0F5): X/Y fixed-point s64, Z f32, quaternion (0, 0, sin(yaw/2), cos(yaw/2)) | World drops every `CSMoveUnit` silently until this arrives |
+
+### Type 2 as the farm wagon produces it
+
+`throttle` stays 0 and the wheel count 0 (the wagon is not a wheeled-simulation vehicle). Velocity shorts use a
+30 m/s full scale (4369 = 4.0 m/s). The rotation shorts are the x, y, z of the full orientation quaternion (terrain
+pitch and roll included, w implied). Cruise speed is 4.0 m/s forward and in reverse; acceleration and braking are
+2.5 m/s² (= 1 / `lin_inertia`, 1 / `lin_deaccel_inertia`). `steering` follows A/D (+1 A, -1 D) over
+`rot_inertia` seconds, the angular velocity z is steering × `angVel` (±0.40 rad/s), mirrored while backing up;
+the wagon also turns at a standstill. The trailing extra-flags byte is 1 on the first packet after the throttle
+key is released, otherwise 0.
+
+### Ships
+
+Ships are simulated by the zone; the driver sends only `CSMoveUnit` type 5 (throttle s8, steering s8). The real
+client's type 5 stream could not be captured (see above); GodotAge sends throttle ±127 (W/S) and steering +127 for
+D / -127 for A (AAEmu `BoatWaterlineDriveRules`: "+127 is starboard") on every change and at the land-vehicle
+cadence. The zone streams the hull back as type 4 in `SCUnitMovements`; live, W moved the rowboat 7.8 m north in
+4 s and W+D turned it to -56°.
 
 ## `CSMoveUnit` body
 
@@ -43,10 +68,10 @@ Move-type-specific fields follow the common header:
 * **Type 5, `ShipRequestMoveType`:** throttle `s8`, steering `s8`. This is input only; the server
   owns ship pose and physics.
 
-The viewer exposes exact type 2 and type 5 body writers and a caller-supplied raw type 5 action.
-It does not schedule or synthesize either move type. Received type 4 movement follows the existing
-server movement path: the unit target is interpolated in `OnlineSession._Process` with
-`1 - exp(-10 * delta)`.
+`OnlineSession.Vehicles.cs` drives both: land vehicles are simulated client-side and streamed as type 2
+(see the captured behaviour above); at a ship's helm only type 5 requests are sent. Received vehicle/ship
+movement keeps the full orientation quaternion and is slerped in `OnlineSession._Process`; the driver
+ignores the server's echo of its own land vehicle.
 
 ## Confirmed C2S slave and mate requests
 
@@ -106,10 +131,10 @@ path the AAEmu reader explicitly accepts.
 The existing seat relation packets are `SCUnitAttached` (`child bc, point u8, parent bc unless point
 is `0xFF`, reason u8`) and `SCUnitDetached` (`child bc, reason u8`). `AttachPointKind` values 1 and
 2–8 identify driver and passenger seats; 9–82 include equipment points such as cannons, sails,
-ladders, rudders, and bells. Static slave prefabs in the inspected rowboat, speedboat, galleon, and
-merchant-ship members contain no stable `$driver` or `$passengerN` helper transform. The viewer
-retains the parent relation so the player/camera follows a moving hull, but does not invent seat
-offsets; only actor-mount bone attachments are used.
+ladders, rudders, and bells. Seats come from the hull itself: CGF hulls carry `$driver` / `$passengerN`
+helper nodes (the rowboat's `smallboat_body.cgf` has `$driver` and `$passenger0`), and skinned AnimObject bodies
+carry them as bones (the farm wagon's `transfers_trailer_a_body.chr` has a `$driver` bone). The rider is parented to
+that node, oriented with the hull.
 
 ## Models, equipment, and pet UI state
 
@@ -148,26 +173,11 @@ or lamp doodads. A follow-up visual implementation needs the CGF helper reader a
 resolved attach point and orientation. CGA gear and animated hull state also need an animation-capable
 model path.
 
-## Runtime test plan (not run here)
+## Live verification (2026-09-30)
 
-1. From the viewer root, run `git -c core.autocrlf=false apply --check -p1 <path-to-deliver/patches/viewer.patch>`,
-   then apply it with the same command minus `--check`. Copy the two delivered source files to the paths
-   in `deliver/README.md` and build against the viewer's existing AAEmu.Game project reference.
-2. Start the viewer against a dedicated test World/Zone and the configured `game_pak` plus decrypted
-   database. Summon one mate and one slave with known template IDs; capture C2S and S2C traffic.
-   Confirm mate use is `CSStartSkill`, slave use follows the item’s skill path or the observed
-   `CSSpawnSlave` placement path, and dismissal uses `CSRemoveMate` or `CSDespawnSlave`/`CSDiscardSlave`
-   as appropriate.
-3. Confirm `SCMateSpawned` timeline, `SCUnitState` mate timeline, HP, level, skills, and mount-skill
-   IDs appear together in `MateSlaveState`; confirm `SCMySlave` max HP joins only its object ID.
-   Verify a mate uses its ActorModel and a rowboat/speedboat resolves the expected static hull.
-4. Board a mate and each supported vessel. Verify `SCUnitAttached` moves the player parent and camera
-   with the mount/hull, `SCUnitDetached` restores the player, and attach points above 8 are not treated
-   as generic passenger bones. Record actual local seat transforms before implementing seat offsets.
-5. Drive a ship with the original client and capture type 5 plus server type 4. Use the captured raw
-   bytes and timing to validate the writer and only then derive input mapping/cadence. Capture type 2
-   from a wheeled slave before validating its full pose/wheel writer. Compare position smoothness and
-   packet cadence with the original client.
-6. Equip/unequip ship and mate gear; verify the packet entry count, item snapshots, slot pairs,
-   expiry, success, and subsequent equipment state. Capture model anchors for sails/cannons before
-   adding gear visuals. Verify state/damage visuals separately for each confirmed database state.
+Both life cycles were run live in GodotAge (scenario steps `useitem`, `targetslave`, `key F`, `usedoodad 2384`,
+`hold W+D`, `modeaction`, `vehicle`, `burst`) with the World's `/slave info` confirming the server-side pose after
+each leg: the wagon's World pose followed the client stream (W 3 s: y +9.8 m; W+D: yaw -58°; S 2 s: back 2.8 m; A at
+a standstill: yaw -58° to -26°), and the rowboat's zone-simulated hull answered the type 5 requests (W 4 s: 7.8 m
+north; W+D 3 s: yaw -57°). The horn (mode slot 3), slave info (SHOW_SLAVE_INFO), dismount and despawn were all
+accepted by the server.

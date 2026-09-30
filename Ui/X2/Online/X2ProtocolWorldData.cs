@@ -51,9 +51,25 @@ public sealed class X2ProtocolWorldData : NullWorldData, IDisposable
         }
     }
 
-    public override X2VehicleState? CurrentVehicle => _session is null ? null :
-        new X2VehicleUiProjection(_session.MateSlaveState, _session.Entered.UnitId,
-            _session.Entered.CharacterId, _session.PlayerAttachedUnitId, 0, IsShip, SlaveKind).CurrentVehicle;
+    public override X2VehicleState? CurrentVehicle
+    {
+        get
+        {
+            if (_session is null) return null;
+            var vehicle = new X2VehicleUiProjection(_session.MateSlaveState, _session.Entered.UnitId,
+                _session.Entered.CharacterId, _session.PlayerAttachedUnitId, 0, IsShip, SlaveKind).CurrentVehicle;
+            if (vehicle is null) return null;
+            var template = _session.VehicleTemplateOf(vehicle.UnitId);
+            return vehicle with
+            {
+                // GetSiegeWeaponSpeed read 3.63 just after a 4.0 m/s run in the real client: metres per second
+                Speed = _session.VehicleSpeed(vehicle.UnitId),
+                TurnSpeed = _session.VehicleTurnRate(vehicle.UnitId),
+                HasVehicleInfo = template?.Land?.WheeledSimulation == true,
+                CustomizingType = template?.Customizable == true ? 1 : 0,
+            };
+        }
+    }
 
     public override X2ApiFamilySnapshot SiegeWeapon
     {

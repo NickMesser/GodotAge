@@ -79,6 +79,8 @@ public partial class X2UiLayer
             return host.RunString($"ADDON:ToggleContent({uic})", "=hotkey");
         if (action == "action_bar_button" && int.TryParse(argument, out var slot))
             return UseActionSlot(slot); // the bar's contents decide (skill, item, ...), as in the client
+        if (action == "mode_action_bar_button" && int.TryParse(argument, out var modeSlot))
+            return _combatBinding?.UseModeActionSlot(modeSlot) == true; // vehicle mode bar (R, T, Y, U ... by default)
         if (action == "open_chat")
         {
             // Enter opens the chat input line; the layer takes keyboard focus so the typed text reaches it

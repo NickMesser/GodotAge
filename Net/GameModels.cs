@@ -219,6 +219,18 @@ public sealed class UnitMovement
     public float Yaw { get; init; }
     public bool HasPosition { get; init; } = true;
 
+    /// <summary>
+    /// Vehicle, ship and transfer bodies: the full orientation (Cry axes) the sender reported, decoded from the three
+    /// short quaternion parts (w implied, non-negative). Identity for unit bodies, which carry only a heading.
+    /// </summary>
+    public Quaternion Rotation { get; init; } = Quaternion.Identity;
+
+    /// <summary>Vehicle and ship bodies: angular velocity (rad/s, Cry axes).</summary>
+    public Vector3 AngularVelocity { get; init; }
+
+    /// <summary>Vehicle bodies: steering as the driver's client reported it (-1..1, positive turns left).</summary>
+    public float Steering { get; init; }
+
     // Unit kind only
     public sbyte DeltaX { get; init; }
     public sbyte DeltaY { get; init; }

@@ -74,6 +74,8 @@ public static class Opcodes
     public const ushort SCUnitFlyingStateChanged = 0x0A9;
     public const ushort SCUnitPoints = 0x0EF;
     public const ushort SCChatMessage = 0x102;
+    public const ushort SCDoodadCreated = 0x14E;
+    public const ushort SCDoodadRemoved = 0x14F;
     public const ushort SCDoodadsCreated = 0x154;
     public const ushort SCDoodadsRemoved = 0x155;
     public const ushort SCResultRestrictCheck = 0x24A;

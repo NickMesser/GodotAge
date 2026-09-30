@@ -456,7 +456,9 @@ public sealed class NativeSlotWidget : SlotWidget
         if (clickable) _clickButtons.Add(button);
         else _clickButtons.Remove(button);
     }
-    internal bool AcceptsClick(string button) => _clickButtons.Contains(button);
+    // Lua's btn:RegisterForClicks("RightButton") on an inventory slot can bind to ButtonWidget.RegisterForClicks(params)
+    // (seen live: the bag slot then refused right clicks, so a summon scroll could not be used from the bag).
+    internal new bool AcceptsClick(string button) => _clickButtons.Contains(button) || base.AcceptsClick(button);
 
     public new void EstablishSlot(object? slotType, double slotIndex)
     {
