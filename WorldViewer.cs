@@ -21,6 +21,8 @@ namespace AAEmu.GodotViewer;
 /// --player=10 (race model id) --hour=12 --time-scale=0 --orbit=7 --autorun=seconds --screenshot=path.png
 /// --render-parity[=0|1] --material-parity[=0|1] --ssao[=0|1] --ssr[=0|1] --glow[=0|1]
 /// --glow-bicubic[=0|1] --vegetation-distance=scale --vegetation-shadows[=0|1]
+/// --surface-vegetation[=0|1] (default 1: the groups surface.xml attaches to terrain surfaces) --msaa=0|2|4|8
+/// --vegetation-gain=x (Vegetation shader diffuse scale, default 1/0.31; see ModelLibrary.VegetationGain)
 /// --sky-hdr[=0|1] (default 1; 0 preserves the static zone cube/procedural sky path)
 /// --water-enhanced[=0|1] --water-waves[=0|1] --water-reflections[=0|1] --water-depth-effects[=0|1]
 /// --ocean-vertex-waves[=0|1] (default 0) --water-underwater-fog[=0|1]
@@ -172,6 +174,8 @@ public partial class WorldViewer : Node3D
     private bool _perfFarLodBias = true;
     private bool _perfVisibilityFades = true;
     private bool _perfNearVegetationShadows = true;
+    private bool _surfaceVegetation = true;
+    private int _msaa = -1;
     private bool _perfVegetationDistance = true;
     private bool _perfWorldLights = true;
     private bool _perfNameplateThrottle = true;
@@ -313,6 +317,7 @@ public partial class WorldViewer : Node3D
         var focus = _walking ? _player.CryPosition : _world.ToCry(_flyCamera.Position);
         _world.SetFocus(focus.X, focus.Y);
         _world.UpdateVegetationShadows(_world.ToGodot(focus.X, focus.Y, focus.Z));
+        _world.UpdateSurfaceVegetation();
         if (GetViewport().GetCamera3D() is { } oceanCamera)
         {
             var oceanEye = _world.ToCry(oceanCamera.GlobalPosition);
@@ -436,6 +441,9 @@ public partial class WorldViewer : Node3D
                 case "glow-bicubic": RenderGlowBicubic = value != "0"; break;
                 case "vegetation-distance": VegetationDistanceScale = float.Parse(value, System.Globalization.CultureInfo.InvariantCulture); break;
                 case "vegetation-shadows": VegetationShadows = value != "0"; break;
+                case "surface-vegetation": _surfaceVegetation = value != "0"; break;
+                case "msaa": _msaa = int.Parse(value); break;
+                case "vegetation-gain": ModelLibrary.VegetationGain = float.Parse(value, System.Globalization.CultureInfo.InvariantCulture); break;
                 case "shadow-distance": RenderShadowDistance = float.Parse(value, System.Globalization.CultureInfo.InvariantCulture); break;
                 case "shadow-split1": RenderShadowSplit1 = float.Parse(value, System.Globalization.CultureInfo.InvariantCulture); break;
                 case "shadow-blur": RenderShadowBlur = float.Parse(value, System.Globalization.CultureInfo.InvariantCulture); break;
@@ -558,6 +566,11 @@ public partial class WorldViewer : Node3D
         _airFogSunScatter = _environment.FogSunScatter;
         _airFogHeightDensity = _environment.FogHeightDensity;
         AddChild(new WorldEnvironment { Environment = _environment });
+        if (_msaa >= 0)
+            GetViewport().Msaa3D = _msaa switch
+            {
+                >= 8 => Viewport.Msaa.Msaa8X, >= 4 => Viewport.Msaa.Msaa4X, >= 2 => Viewport.Msaa.Msaa2X, _ => Viewport.Msaa.Disabled,
+            };
         _sun = new DirectionalLight3D
         {
             ShadowEnabled = true,
@@ -619,6 +632,7 @@ public partial class WorldViewer : Node3D
             CheapFarLod = _perfFarLodBias,
             VisibilityFades = _perfVisibilityFades,
             LimitVegetationShadows = _perfNearVegetationShadows,
+            SurfaceVegetation = _surfaceVegetation,
             EnhancedWater = RenderWaterEnhanced,
             WaterWaves = RenderWaterWaves,
             WaterReflections = RenderWaterReflections,
@@ -1035,8 +1049,15 @@ public partial class WorldViewer : Node3D
         {
             DynamicSky.Apply(_dynamicSky, skyParameters);
             _environment.Sky.SkyMaterial = _dynamicSky;
-            _environment.AmbientLightColor = Colors.White;
-            _environment.AmbientLightSkyContribution = 1f;
+            // The dynamic sky is the background and the reflections; the ambient light stays the zone's own, the
+            // client's g_PS_SkyColor (TOD "Sky color" x multiplier) in the sun's units. The property is sRGB-encoded:
+            // its hue goes in encoded, its (linear) magnitude as the energy.
+            var skyAmbient = e.SkyAmbientColor * (float)RenderParityProfile.LightScale;
+            var ambientMax = Math.Max(skyAmbient.X, Math.Max(skyAmbient.Y, Math.Max(skyAmbient.Z, 1e-4f)));
+            _environment.AmbientLightColor = new Color(skyAmbient.X / ambientMax, skyAmbient.Y / ambientMax,
+                skyAmbient.Z / ambientMax).LinearToSrgb();
+            _environment.AmbientLightEnergy = ambientMax;
+            _environment.AmbientLightSkyContribution = 0f;
             return;
         }
 

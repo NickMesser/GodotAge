@@ -48,7 +48,7 @@ internal static class RenderParityProfile
         var sunColor = FromSource(sample.SunColor);
         var sunMax = Math.Max(sample.SunColor.X, Math.Max(sample.SunColor.Y, sample.SunColor.Z));
         sun.LightColor = sunColor;
-        sun.LightEnergy = (float)Math.Clamp(sample.SunIntensity * sunMax * 0.16, 0.01, 4.0);
+        sun.LightEnergy = (float)Math.Clamp(sample.SunIntensity * sunMax * LightScale, 0.01, 4.0);
         sun.LightSpecular = (float)Math.Clamp(sample.SunSpecularMultiplier, 0.0, 8.0);
         sun.ShadowOpacity = (float)Math.Clamp(sample.ShadowIntensity, 0.0, 1.0);
 
@@ -93,6 +93,12 @@ internal static class RenderParityProfile
     }
 
     public static Color FromSource(System.Numerics.Vector3 color) => new(color.X, color.Y, color.Z);
+
+    /// <summary>
+    /// Godot light units per client light unit: the sun's energy is its TOD colour x multiplier times this (about 6.2 x
+    /// 0.16 = 1 at noon). Every other client light term (the ambient) takes the same factor so their ratio is kept.
+    /// </summary>
+    public const double LightScale = 0.16;
 
     // ComposeFinalHDRGlow weights of the 1/4, 1/8 and 1/16 resolution bloom maps, keyed by Godot glow level index.
     private static readonly Dictionary<int, float> BloomLevelWeights = new() { [1] = 2.0f, [2] = 1.15f, [3] = 0.45f };

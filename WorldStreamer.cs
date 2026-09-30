@@ -34,7 +34,7 @@ internal sealed class WorldStreamer
         public Detail? Loading;   // version a loader is building
         public Node3D Container;  // main thread only
         public List<(ulong, int, int)> WaterKeys = [];
-        public List<(MultiMeshInstance3D Node, Aabb Bounds)> VegetationShadowNodes = [];
+        public List<(MultiMeshInstance3D Node, Aabb Bounds, float Reach)> VegetationShadowNodes = [];
     }
 
     private sealed record TerrainArrays(Vector3[] Vertices, Vector3[] Normals, Color[] Colors, Vector2[] UVs, int[] Indices);
@@ -61,6 +61,7 @@ internal sealed class WorldStreamer
     private long _lastVegetationShadowUpdate;
     private WaterSurfaceProfile _oceanWaterProfile = WaterMaterialFactory.DefaultOceanProfile;
     private TerrainDetail _detail;
+    private ProceduralVegetation _surfaceVegetation;
     private CellVegetationTable _vegetation;
     private CellSurfaceTypes _surfaces;
     private string _worldRoot;
@@ -87,6 +88,8 @@ internal sealed class WorldStreamer
     public bool CheapFarLod { get; init; } = true;
     public bool VisibilityFades { get; init; } = true;
     public bool LimitVegetationShadows { get; init; } = true;
+    /// <summary>Grow the vegetation groups surface.xml attaches to terrain surfaces (see <see cref="ProceduralVegetation"/>).</summary>
+    public bool SurfaceVegetation { get; init; } = true;
     /// <summary>Use the shared sampled-normal/PBR water material instead of the legacy transparent colour.</summary>
     public bool EnhancedWater { get; init; } = true;
     /// <summary>Animate the authored water normal map. This does not move geometry or alter water collision heights.</summary>
@@ -193,7 +196,7 @@ internal sealed class WorldStreamer
         var maxDistanceSquared = VegetationShadowDistance * VegetationShadowDistance;
         lock (_cellsGate)
             foreach (var entry in _cells.Values)
-            foreach (var (node, bounds) in entry.VegetationShadowNodes)
+            foreach (var (node, bounds, reach) in entry.VegetationShadowNodes)
             {
                 if (!GodotObject.IsInstanceValid(node))
                     continue;
@@ -201,14 +204,27 @@ internal sealed class WorldStreamer
                 var maxX = minX + bounds.Size.X;
                 var minZ = node.Position.Z + bounds.Position.Z;
                 var maxZ = minZ + bounds.Size.Z;
-                var farthestX = Math.Max(Math.Abs(minX - focus.X), Math.Abs(maxX - focus.X));
-                var farthestZ = Math.Max(Math.Abs(minZ - focus.Z), Math.Abs(maxZ - focus.Z));
-                var cast = farthestX * farthestX + farthestZ * farthestZ <= maxDistanceSquared;
+                bool cast;
+                if (reach > 0f)
+                {
+                    var nearestX = Math.Max(0f, Math.Max(minX - focus.X, focus.X - maxX));
+                    var nearestZ = Math.Max(0f, Math.Max(minZ - focus.Z, focus.Z - maxZ));
+                    cast = nearestX * nearestX + nearestZ * nearestZ <= reach * reach;
+                }
+                else
+                {
+                    var farthestX = Math.Max(Math.Abs(minX - focus.X), Math.Abs(maxX - focus.X));
+                    var farthestZ = Math.Max(Math.Abs(minZ - focus.Z), Math.Abs(maxZ - focus.Z));
+                    cast = farthestX * farthestX + farthestZ * farthestZ <= maxDistanceSquared;
+                }
                 var setting = cast ? GeometryInstance3D.ShadowCastingSetting.On : GeometryInstance3D.ShadowCastingSetting.Off;
                 if (node.CastShadow != setting)
                     node.CastShadow = setting;
             }
     }
+
+    /// <summary>Main thread. Grows and drops surface vegetation around the focus.</summary>
+    public void UpdateSurfaceVegetation() => _surfaceVegetation?.Update(_focusWorldX, _focusWorldY);
 
     /// <summary>True once the heightmap of the cell containing a Cry world position is loaded.</summary>
     public bool HasHeightsAt(float cryX, float cryY) =>
@@ -388,7 +404,11 @@ internal sealed class WorldStreamer
 
     public void Start() => Task.Run(Run);
 
-    public void Stop() => _stopped = true;
+    public void Stop()
+    {
+        _stopped = true;
+        _surfaceVegetation?.Stop();
+    }
 
     private readonly List<Thread> _loaderThreads = new();
 
@@ -401,6 +421,7 @@ internal sealed class WorldStreamer
     public void StopAndWait(TimeSpan limit)
     {
         _stopped = true;
+        _surfaceVegetation?.Stop();
         Thread[] threads;
         lock (_loaderThreads)
             threads = _loaderThreads.ToArray();
@@ -414,6 +435,9 @@ internal sealed class WorldStreamer
                 break;
             }
         }
+        var rest = limit - deadline.Elapsed;
+        if (rest > TimeSpan.Zero)
+            _surfaceVegetation?.Join(rest);
     }
 
     private void Run()
@@ -429,6 +453,10 @@ internal sealed class WorldStreamer
             var surfaceXml = PakFiles.Read($"{_worldRoot}/surface.xml");
             _surfaces = surfaceXml != null ? CellSurfaceTypes.Read(surfaceXml) : null;
             _detail = new TerrainDetail(_bank, _models, _surfaces);
+            if (SurfaceVegetation && ShowObjects && _vegetation != null && _surfaces != null)
+                _surfaceVegetation = new ProceduralVegetation(_models, _post, _root, _vegetation, _surfaces, _heights, _surfaceIds,
+                    cell => PakFiles.Read($"{_worldRoot}/cells/{cell.X:000}_{cell.Y:000}/client/terrain/cover.ctc"),
+                    ToGodot, VegetationDistanceScale, VegetationShadows);
             _oceanWaterProfile = WaterMaterialFactory.OceanProfileFor(_worldRoot);
             if (EnhancedWater && (WaterWaves || WaterDepthEffects))
                 WaterMaterialFactory.Prepare(_oceanWaterProfile);
@@ -538,7 +566,7 @@ internal sealed class WorldStreamer
         var name = $"Cell_{cell.X:000}_{cell.Y:000}_{detail}";
         // A replacement version builds hidden and takes over from the old one at the end.
         var container = new Node3D { Name = name, Visible = entry.Loaded == null };
-        List<(MultiMeshInstance3D Node, Aabb Bounds)> vegetationShadowNodes = [];
+        List<(MultiMeshInstance3D Node, Aabb Bounds, float Reach)> vegetationShadowNodes = [];
         _post(() => _root.AddChild(container));
 
         var heightmap = PakFiles.Read($"{cellRoot}/terrain/heightmap.dat");

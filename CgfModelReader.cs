@@ -34,6 +34,12 @@ public sealed class CgfSubmesh
     public Vector4[] Colors;
 
     /// <summary>
+    /// Normal of the stored tangent frame, cross(tangent, binormal) * W, or null. CryEngine's Vegetation shader lights with
+    /// this frame rather than the normal stream (vegetation.cfx: worldTangentN), so grass cards keep their card normal.
+    /// </summary>
+    public Vector3[] FrameNormals;
+
+    /// <summary>
     /// Triangle list into the arrays above. Front faces are counter-clockwise around the normal (right-handed).
     /// Godot treats clockwise as front, so reverse each triangle (or call <see cref="CgfModel.FlipWinding"/>)
     /// when building an ArrayMesh.
@@ -153,6 +159,7 @@ public sealed class CgfModel
             }
             bool hasN = parts.TrueForAll(p => p.Normals != null), hasUv = parts.TrueForAll(p => p.UVs != null);
             bool hasT = parts.TrueForAll(p => p.Tangents != null), hasC = parts.TrueForAll(p => p.Colors != null);
+            var hasF = parts.TrueForAll(p => p.FrameNormals != null);
             var m = new CgfSubmesh
             {
                 NodeName = parts[0].NodeName,
@@ -162,6 +169,7 @@ public sealed class CgfModel
                 UVs = hasUv ? new Vector2[nv] : null,
                 Tangents = hasT ? new Vector4[nv] : null,
                 Colors = hasC ? new Vector4[nv] : null,
+                FrameNormals = hasF ? new Vector3[nv] : null,
                 Indices = new int[ni],
             };
             int vo = 0, io = 0;
@@ -172,6 +180,7 @@ public sealed class CgfModel
                 if (hasUv) p.UVs.CopyTo(m.UVs, vo);
                 if (hasT) p.Tangents.CopyTo(m.Tangents, vo);
                 if (hasC) p.Colors.CopyTo(m.Colors, vo);
+                if (hasF) p.FrameNormals.CopyTo(m.FrameNormals, vo);
                 for (var i = 0; i < p.Indices.Length; i++)
                     m.Indices[io + i] = p.Indices[i] + vo;
                 vo += p.Positions.Length;
@@ -400,7 +409,7 @@ public static class CgfModelReader
     private static int AddMeshSubmeshes(byte[] f, Dictionary<int, Chunk> byId, MeshData mesh, CgfNode node, Matrix4x4 world,
         List<CgfMaterialSlot> slots, CgfModel model, ref Vector3 min, ref Vector3 max)
     {
-        Vector3[] pos = null, nrm = null;
+        Vector3[] pos = null, nrm = null, frameNrm = null;
         Vector2[] uv = null;
         Vector4[] tan = null, col = null;
         int[] idx = null;
@@ -460,11 +469,14 @@ public static class CgfModelReader
                     };
                     break;
                 case StreamTangents:
-                    tan = es == 16 ? ReadTangents(f, d, count) : Unsupported<Vector4>(model, node, type, es);
+                    tan = es == 16 ? ReadTangents(f, d, count, out frameNrm) : Unsupported<Vector4>(model, node, type, es);
                     break;
                 case StreamQTangents:
                     if (es == 8)
+                    {
                         ReadQTangents(f, d, count, out tan, out nrm);
+                        frameNrm = nrm;
+                    }
                     else
                         Unsupported<Vector4>(model, node, type, es);
                     break;
@@ -493,6 +505,7 @@ public static class CgfModelReader
         nrm = MatchLength(nrm, pos.Length, "normals", node, model);
         uv = MatchLength(uv, pos.Length, "texcoords", node, model);
         tan = MatchLength(tan, pos.Length, "tangents", node, model);
+        frameNrm = MatchLength(frameNrm, pos.Length, "tangent frame", node, model);
         col = MatchLength(col, pos.Length, "colors", node, model);
 
         var subsets = ReadSubsets(f, byId, mesh.SubsetsChunkId);
@@ -550,6 +563,7 @@ public static class CgfModelReader
                 UVs = uv != null ? new Vector2[verts.Count] : null,
                 Tangents = tan != null ? new Vector4[verts.Count] : null,
                 Colors = col != null ? new Vector4[verts.Count] : null,
+                FrameNormals = frameNrm != null ? new Vector3[verts.Count] : null,
             };
             for (var i = 0; i < verts.Count; i++)
             {
@@ -564,6 +578,8 @@ public static class CgfModelReader
                     sm.UVs[i] = uv[v];
                 if (sm.Colors != null)
                     sm.Colors[i] = col[v];
+                if (sm.FrameNormals != null)
+                    sm.FrameNormals[i] = identity ? SafeNormalize(frameNrm[v]) : SafeNormalize(Vector3.TransformNormal(frameNrm[v], normalM));
                 if (sm.Tangents != null)
                 {
                     var tv = tan[v];
@@ -850,14 +866,20 @@ public static class CgfModelReader
     /// SMeshTangents: tangent int16[4] then binormal int16[4], normalised by 32767. W of both is the handedness:
     /// normal = cross(tangent, binormal) * W, tangent ~ +dP/du, binormal ~ +dP/dv.
     /// </summary>
-    internal static Vector4[] ReadTangents(byte[] f, int p, int n)
+    internal static Vector4[] ReadTangents(byte[] f, int p, int n) => ReadTangents(f, p, n, out _);
+
+    /// <summary><see cref="ReadTangents(byte[], int, int)"/> that also returns each frame's normal, cross(tangent, binormal) * W.</summary>
+    internal static Vector4[] ReadTangents(byte[] f, int p, int n, out Vector3[] frameNormals)
     {
         var a = new Vector4[n];
+        frameNormals = new Vector3[n];
         for (var i = 0; i < n; i++, p += 16)
         {
             var t = new Vector3(S16(f, p), S16(f, p + 2), S16(f, p + 4)) / 32767f;
+            var b = new Vector3(S16(f, p + 8), S16(f, p + 10), S16(f, p + 12)) / 32767f;
             var w = S16(f, p + 6) < 0 ? -1f : 1f;
             a[i] = new Vector4(SafeNormalize(t), w);
+            frameNormals[i] = SafeNormalize(Vector3.Cross(t, b) * w);
         }
         return a;
     }

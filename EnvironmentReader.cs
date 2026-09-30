@@ -102,6 +102,9 @@ public sealed class EnvironmentReader
         var rawSun = _curves.TryGetValue("Sun color", out var sunCurve) ? sunCurve.Vector(day, Vector3.One) : Vector3.One;
         var oceanInScatter = oceanScatteringSource * (float)S("Ocean fog color multiplier", 1) *
                              rawSun * (float)(S("Sun color multiplier", 1) * _zone.SunColorMultiplier);
+        // The ambient light of lit objects, terrain and vegetation (g_PS_SkyColor): TOD "Sky color" x multipliers, stored values.
+        var rawSky = _curves.TryGetValue("Sky color", out var skyCurve) ? skyCurve.Vector(day, Vector3.Zero) : Vector3.Zero;
+        var skyAmbient = rawSky * (float)(S("Sky color multiplier", 1) * _zone.SkyColorMultiplier);
         var fogDensity = S("Volumetric fog: Global density", S("Fog layer density (bottom)", 0)) * _zone.FogGlobalDensityMultiplier;
         var fogRampStart = S("Volumetric fog: Ramp start", 0);
         var fogRampEnd = S("Volumetric fog: Ramp end", 1000);
@@ -135,6 +138,7 @@ public sealed class EnvironmentReader
             OceanFogDensityUnderWater = S("Ocean fog density under water", 0.05),
             OceanFogDensityIntoWater = S("Ocean fog density into water", 0.04),
             OceanInScatterColor = oceanInScatter,
+            SkyAmbientColor = skyAmbient,
             OceanScatterUnderWater = S("Ocean fog under water Scatter", 1),
             OceanScatterIntoWater = S("Ocean fog into water Scatter", 1),
             FilmCurveShoulderScale = S("Film curve shoulder scale", 1),
@@ -266,6 +270,12 @@ public sealed record EnvironmentSample(double Hour, double NormalizedDay, Vector
     /// "Sun color multiplier" (client working values, no sRGB decode).
     /// </summary>
     public Vector3 OceanInScatterColor { get; init; }
+    /// <summary>
+    /// The client's ambient light (g_PS_SkyColor: terrain.cfx and vegetation.cfx frag_custom_ambient): stored TOD
+    /// "Sky color" x "Sky color multiplier" x the zone's SkyColorMultiplier, in the same units as the sun colour x
+    /// "Sun color multiplier" (client working values, no sRGB decode).
+    /// </summary>
+    public Vector3 SkyAmbientColor { get; init; }
     public double OceanScatterUnderWater { get; init; } = 1;
     public double OceanScatterIntoWater { get; init; } = 1;
     /// <summary>TOD "Film curve shoulder/midtones/toe scale" of the client's filmic display curve (1 = neutral).</summary>

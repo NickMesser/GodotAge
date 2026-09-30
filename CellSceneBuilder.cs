@@ -30,7 +30,9 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
     private const float FarMinTreeHeight = 8f;
 
     private const float BlockSize = 256f;
-    private const float GrassBlockSize = 128f;
+    /// <summary>Painted vegetation fades per instance; small blocks let whole blocks past their reach drop out of the
+    /// vertex stage (main and shadow passes) instead of collapsing instance by instance.</summary>
+    private const float GrassBlockSize = 64f;
     /// <summary>Current far grouping size, retained for the performance A/B switch.</summary>
     private const float FarBlockSize = 512f;
     /// <summary>Far geometry can use a whole 1 km cell as one culling block.</summary>
@@ -41,6 +43,7 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
         public MeshRef Mesh;
         public bool CastShadow;
         public bool IsVegetation;
+        public bool IsGrass;
         public float MaxViewDistance;
         public readonly List<Transform3D> Transforms = [];
         public readonly List<Color> Colors = [];
@@ -63,8 +66,11 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
         public readonly List<(ulong, int, int)> WaterKeys = [];
         /// <summary>Solid placements the player can stand on (brushes, entity models, voxels; not vegetation).</summary>
         public readonly List<Collidable> Collidables = [];
-        /// <summary>Near vegetation groups whose shadows are reevaluated as the focus moves.</summary>
-        public readonly List<(MultiMeshInstance3D Node, Aabb Bounds)> VegetationShadowNodes = [];
+        /// <summary>
+        /// Near vegetation groups whose shadows are reevaluated as the focus moves. Reach 0: trees, cast while the whole
+        /// group is within the tree shadow distance; otherwise painted vegetation, cast while any part is within Reach.
+        /// </summary>
+        public readonly List<(MultiMeshInstance3D Node, Aabb Bounds, float Reach)> VegetationShadowNodes = [];
         public override string ToString() =>
             $"{Brushes} brushes, {Trees} trees, {Grass} grass, {Decals} decals, {Roads} roads, {Water} water, {Voxels} voxels, " +
             $"{Clouds} clouds, {EntityModels} entity models, {Lights} lights ({CharacterEntities} character entities not drawn yet, {Skipped} skipped)";
@@ -120,21 +126,26 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
                 if (far && (isGrass || veg.BoundsMax.Z - veg.BoundsMin.Z < FarMinTreeHeight))
                     continue;
                 var brightness = Mathf.Clamp(veg.Brightness, 0f, 4f);
-                // Brightness remains an independent instance scalar. Terrain RGB and its enable bit travel in custom
-                // data so the Vegetation shader can restrict that tint to the model's base vertices.
+                // Brightness remains an independent instance scalar. Custom data carries the terrain colour under the
+                // instance and, in alpha, the record's own view distance (whole metres; painted vegetation fades per
+                // instance like the engine's, trees keep their block range) plus the terrain-colour flag.
                 var instanceColor = new Color(brightness, brightness, brightness);
-                // Alpha packs two shader flags in [0, 1]: terrain colour = 1/3, grass normal bending = 2/3.
-                var terrainData = new Color(1f, 1f, 1f, isGrass ? 2f / 3f : 0f);
+                // Stored view distances use the editor's ratio; the client draws painted vegetation out to its own.
+                var viewDistanceScale = isGrass ? vegetationDistanceScale * ProceduralVegetation.StoredViewDistanceScale : vegetationDistanceScale;
+                var viewDistance = isGrass && veg.MaxViewDistance > 0f ? PackViewDistance(veg.MaxViewDistance * viewDistanceScale) : 0f;
+                var terrainData = new Color(1f, 1f, 1f, viewDistance);
                 if (models.RenderParity && veg.UseTerrainColor && terrainColors != null && terrainColorSize > 0)
                     terrainData = SampleTerrainColor(veg.Position, terrainColors, terrainColorSize) with
                     {
-                        A = terrainData.A + 1f / 3f,
+                        A = viewDistance + TerrainColorFlag,
                     };
-                var castShadow = vegetationShadows && !isGrass && veg.Flags.HasFlag(CellRenderFlags.CastShadowMaps);
+                // The record's own flag (the group's bCastShadow), for grass as well: it casts alpha-tested shadows.
+                var castShadow = vegetationShadows && veg.Flags.HasFlag(CellRenderFlags.CastShadowMaps);
                 if (AddModel(groups, veg.ModelPath, CellPaths.MaterialFile(veg.MaterialPath), veg.Transform, cellOffset,
                         castShadow, veg.MaxViewDistance, block,
                         instanceColor: instanceColor, instanceCustomData: terrainData,
-                        maxViewDistanceScale: vegetationDistanceScale, vegetation: !isGrass))
+                        maxViewDistanceScale: viewDistanceScale, vegetation: !isGrass, grass: isGrass,
+                        receiveShadows: veg.ReceiveShadows))
                 {
                     if (isGrass) stats.Grass++;
                     else stats.Trees++;
@@ -233,12 +244,17 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
         foreach (var ((_, bx, bz, _, _), g) in groups)
         {
             var trackVegetationShadows = limitVegetationShadows && !far && g.IsVegetation && g.CastShadow;
+            // Painted vegetation (grass) casts only near the camera: e_shadows_cast_view_dist_ratio of its view distance.
+            var trackGrassShadows = limitVegetationShadows && !far && g.IsGrass && g.CastShadow;
             if (models.CreateInstances(g.Mesh, g.Transforms, far ? (visibilityFades ? 6000f : 0f) : VisibilityEnd(g), $"{cellName}_{bx}_{bz}", g.CastShadow && !far,
                     models.RenderParity ? g.Colors : null, models.RenderParity ? g.CustomData : null,
-                    preciseMultiMeshBounds || trackVegetationShadows, far && cheapFarLod ? 0.45f : 1f, visibilityFades) is { } node)
+                    preciseMultiMeshBounds || trackVegetationShadows || trackGrassShadows, far && cheapFarLod ? 0.45f : 1f, visibilityFades) is { } node)
             {
                 if (trackVegetationShadows)
-                    stats.VegetationShadowNodes.Add((node, node.CustomAabb));
+                    stats.VegetationShadowNodes.Add((node, node.CustomAabb, 0f));
+                else if (trackGrassShadows)
+                    stats.VegetationShadowNodes.Add((node, node.CustomAabb,
+                        Math.Min(g.MaxViewDistance * ShadowCastViewDistRatio, PaintedShadowReach)));
                 post(() => parent.AddChild(node));
             }
         }
@@ -304,10 +320,10 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
     private bool AddModel(Dictionary<(string, int, int, bool, bool), Group> groups, string modelPath, string materialPath,
         System.Numerics.Matrix4x4 transform, NVector3 cellOffset, bool castShadow, float maxViewDistance, float blockSize,
         bool solid = false, Color? instanceColor = null, Color? instanceCustomData = null, float maxViewDistanceScale = 1f,
-        bool vegetation = false)
+        bool vegetation = false, bool grass = false, bool receiveShadows = true)
     {
         var t = CryAxes.FromRowVector(transform, cellOffset);
-        var mesh = models.Request(modelPath, materialPath, t.Basis.Determinant() < 0);
+        var mesh = models.Request(modelPath, materialPath, t.Basis.Determinant() < 0, receiveShadows);
         if (mesh == null)
             return false;
         if (solid && !_far && mesh.Radius > 0.3f)
@@ -317,7 +333,7 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
         }
         var key = (mesh.Key, Mathf.FloorToInt(t.Origin.X / blockSize), Mathf.FloorToInt(t.Origin.Z / blockSize), castShadow, vegetation);
         if (!groups.TryGetValue(key, out var group))
-            groups[key] = group = new Group { Mesh = mesh, CastShadow = castShadow, IsVegetation = vegetation };
+            groups[key] = group = new Group { Mesh = mesh, CastShadow = castShadow, IsVegetation = vegetation, IsGrass = grass };
         group.Transforms.Add(t);
         group.Colors.Add(instanceColor ?? Colors.White);
         group.CustomData.Add(instanceCustomData ?? new Color(1f, 1f, 1f, 0f));
@@ -526,7 +542,23 @@ internal sealed class CellSceneBuilder(ModelLibrary models, Action<Action> post,
         return true;
     }
 
-    private static Color SampleTerrainColor(NVector3 position, byte[] rgba, int size)
+    /// <summary>Vegetation custom-data alpha: the group blends with the terrain colour (see the Vegetation shader).</summary>
+    internal const float TerrainColorFlag = 0.25f;
+
+    /// <summary>e_shadows_cast_view_dist_ratio of the client's top shadow level (option_shadow_view_dist_ratio.cfg).</summary>
+    internal const float ShadowCastViewDistRatio = 0.8f;
+
+    /// <summary>
+    /// Farthest painted vegetation shadow: the client's third sun shadow cascade (option_shadow_dist.cfg:
+    /// e_gsm_range_start 3 x e_gsm_range_step 3.5^2 = 36.75 m); past it a grass shadow is below a cascade texel.
+    /// </summary>
+    internal const float PaintedShadowReach = 36.75f;
+
+    /// <summary>A view distance as the Vegetation shader reads it from custom-data alpha: whole metres, at least 1.</summary>
+    internal static float PackViewDistance(float metres) => metres <= 0f ? 0f : MathF.Max(1f, MathF.Round(metres));
+
+    /// <summary>Linear colour of the cover texture (level-0 RGBA, rows north to south) under a cell-local position.</summary>
+    internal static Color SampleTerrainColor(NVector3 position, byte[] rgba, int size)
     {
         var x = Math.Clamp(position.X / WorldStreamer.CellSize, 0f, 0.99999f);
         var y = Math.Clamp(position.Y / WorldStreamer.CellSize, 0f, 0.99999f);

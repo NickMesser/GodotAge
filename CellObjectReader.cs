@@ -141,6 +141,8 @@ public sealed class CellVegetation : CellRenderNode
     /// <summary>Group has bAlignToTerrain. The tilt is already in AngleX / AngleY (quantised from the terrain normal at export);
     /// using the heightmap normal instead fits the stored bounds worse.</summary>
     public bool AlignToTerrain { get; internal set; }
+    /// <summary>vegetation.xml bRecvShadow: whether the instances receive shadows (false for nearly every group).</summary>
+    public bool ReceiveShadows { get; internal set; } = true;
     /// <summary>scale x RotX(AngleX) x RotY(AngleY) x RotZ(AngleZ) x translate(Position), i.e. CryEngine's Rz*Ry*Rx.</summary>
     public Matrix4x4 Transform { get; internal set; }
 }
@@ -698,6 +700,7 @@ public static class CellObjectReader
             v.MaterialPath = g.MaterialPath;
             v.Brightness = g.Brightness;
             v.UseTerrainColor = g.UseTerrainColor;
+            v.ReceiveShadows = g.ReceiveShadows;
             v.AlignToTerrain = g.AlignToTerrain;
         }
         return v;
@@ -837,6 +840,7 @@ public sealed class CellVegetationTable
                 RandomRotation = CellXml.Bool(e, "bRandomRotation"),
                 UseTerrainColor = CellXml.Bool(e, "bUseTerrainColor"),
                 CastShadow = CellXml.Bool(e, "bCastShadow"),
+                ReceiveShadows = CellXml.Bool(e, "bRecvShadow"),
                 Size = CellXml.Float(e, "fSize", 1),
                 SizeVar = CellXml.Float(e, "fSizeVar", 0),
                 Density = CellXml.Float(e, "fDensity", 1),
@@ -869,6 +873,8 @@ public sealed class CellVegetationGroup
     public bool RandomRotation { get; init; }
     public bool UseTerrainColor { get; init; }
     public bool CastShadow { get; init; }
+    /// <summary>bRecvShadow: 0 in 4118 of main_world's 4145 groups; such plants are lit as if unshadowed.</summary>
+    public bool ReceiveShadows { get; init; }
     public float Size { get; init; }
     public float SizeVar { get; init; }
     /// <summary>Instances per ... (editor paint / procedural density).</summary>
