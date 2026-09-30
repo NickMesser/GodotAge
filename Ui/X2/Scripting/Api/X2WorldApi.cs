@@ -138,6 +138,11 @@ public interface IX2WorldData
     string InteractionSkillIconPath { get; }
     /// <summary>Forwards a server request or renderer-side command. State changes only after host/network confirmation.</summary>
     X2WorldCommandResult Execute(X2WorldCommand command);
+    /// <summary>
+    /// A live X2House query (current house, builder design, tax items), or null to fall back to the generic
+    /// handling. Values may include <see cref="X2InventoryItem"/> item-info rows.
+    /// </summary>
+    X2ApiResult? QueryHouse(string method, IReadOnlyList<object?> args);
 }
 
 /// <summary>Offline/fresh-character world state.</summary>
@@ -170,6 +175,7 @@ public class NullWorldData : IX2WorldData
     public virtual X2ApiFamilySnapshot Interaction => X2ApiFamilySnapshot.Empty;
     public virtual string InteractionSkillIconPath => "";
     public virtual X2WorldCommandResult Execute(X2WorldCommand command) => new();
+    public virtual X2ApiResult? QueryHouse(string method, IReadOnlyList<object?> args) => null;
 }
 
 /// <summary>
@@ -203,6 +209,8 @@ public static class X2WorldApi
         var key = table + "." + binding.Name;
         if (Snapshot(data, table) is { } family && Find(family, binding.Name, a) is { } capturedResult)
             return ToLuaResult(capturedResult);
+        if (table == "X2House" && data.QueryHouse(binding.Name, a.Values.ToArray()) is { } house)
+            return ToLuaResult(house);
         switch (key)
         {
             case "X2Time.GetUiMsec": return (double)data.UiMilliseconds;
@@ -402,6 +410,7 @@ public static class X2WorldApi
     private static object? ToLuaValue(object? value) => value switch
     {
         X2ApiTable table => ToLua(table),
+        X2InventoryItem item => X2ItemsApi.ItemTable(item),
         IEnumerable<X2ApiTable> tables => Array(tables.Select(ToLua)),
         IEnumerable<object?> values when value is not string => Array(values.Select(ToLuaValue)),
         _ => value

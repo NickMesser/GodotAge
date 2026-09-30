@@ -12,6 +12,8 @@ namespace AAEmu.GodotViewer.Ui.X2;
 //   clicktext <text>        (clicks the centre of the visible button/text widget showing that text)
 //   chat <line>             (sends the line as the chat box would, e.g. chat /move 15600 15214 123)
 //   hideui / showui         (hides the UI layer for a clean 3D shot)
+//   worldpoint|worldclick <x> <y> [z] [right]   wheel <up|down> [alt|shift|ctrl] [n]   builder   houses
+//   rclickhouse [design]    interacthouse [design]   construct   (housing builder and house tests)
 // Lines starting with # are comments. The scenario starts X2_SCENARIO_DELAY seconds (default 40) after world entry, or with
 // X2_SCENARIO_LOBBY=1 after the character list (stage 8) first appears.
 public partial class X2UiLayer
@@ -362,6 +364,28 @@ public partial class X2UiLayer
                 Emit($"[x2 scenario] destroy item {itemId} (template {item.TemplateId}) at {found.Key.SlotType}:{found.Key.Slot}");
                 break;
             }
+            case "takemail":
+            {
+                // takemail <mail id>: takes a received mail's attachments into the bag (CSTakeAttachmentSequentially; test clean-up)
+                if (_protocolActions == null || !long.TryParse(arg, out var mailId)) break;
+                _protocolActions.TakeMailAttachmentsSequentially(mailId);
+                Emit($"[x2 scenario] take attachments of mail {mailId}");
+                break;
+            }
+            case "destroytemplates":
+            {
+                // destroytemplates <t1,t2,...>: CSDestroyItem for every bag stack of these item templates (test clean-up)
+                var templates = arg.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(uint.Parse).ToHashSet();
+                var session = LiveSession;
+                if (session is null || _protocolActions == null) break;
+                foreach (var (key, item) in session.InventoryState.Items.ToArray())
+                {
+                    if (item is null || !templates.Contains(item.TemplateId) || key.SlotType != 2) continue;
+                    _protocolActions.DestroyItem(item.ItemId, key.SlotType, (byte)key.Slot, (uint)Math.Max(1, item.Count));
+                    Emit($"[x2 scenario] destroy item {item.ItemId} (template {item.TemplateId} x{item.Count}) at {key.SlotType}:{key.Slot}");
+                }
+                break;
+            }
             case "useitem":
             {
                 // useitem <template>: X2Bag:UseItemByType, the bag API the action bar and quick-use buttons call
@@ -573,10 +597,173 @@ public partial class X2UiLayer
                 if (treeRoot != null) Walk(treeRoot, 0); else Emit("[x2 tree] node not found");
                 break;
             }
+            case "worldpoint":
+            case "worldclick":
+            {
+                // worldpoint <x> <y> [z]: moves the pointer to the screen pixel of that world point (terrain height when z
+                // is omitted), as a player aiming at it would; worldclick <x> <y> [right] also clicks there
+                var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var session = LiveSession;
+                var camera = GetViewport().GetCamera3D();
+                if (session?.World is not { } world || camera is null) { Emit("[x2 scenario] no world/camera"); break; }
+                var x = float.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+                var y = float.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+                var z = parts.Length > 2 && float.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var given) ? given : world.TerrainHeightAt(x, y);
+                var pixel = camera.UnprojectPosition(world.ToGodot(x, y, z));
+                Input.WarpMouse(pixel);
+                Input.ParseInputEvent(new InputEventMouseMotion { Position = pixel, GlobalPosition = pixel });
+                if (verb.Equals("worldclick", StringComparison.OrdinalIgnoreCase))
+                {
+                    var button = parts.Any(p => p == "right") ? MouseButton.Right : MouseButton.Left;
+                    Input.ParseInputEvent(new InputEventMouseButton { Position = pixel, GlobalPosition = pixel, ButtonIndex = button, Pressed = true });
+                    Input.ParseInputEvent(new InputEventMouseButton { Position = pixel, GlobalPosition = pixel, ButtonIndex = button, Pressed = false });
+                }
+                Emit($"[x2 scenario] {verb} {x:F1} {y:F1} {z:F2} -> pixel {pixel.X:F0},{pixel.Y:F0}");
+                _scenarioWaitUntil = _scenarioClock + 0.3;
+                break;
+            }
+            case "face":
+            {
+                // face <x> <y>: turns the character (and the camera behind it) toward a world point
+                var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var session = LiveSession;
+                if (session is null) break;
+                var me = session.Player.CryPosition;
+                var x = float.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+                var y = float.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+                session.Player.Heading = AAEmu.GodotViewer.Net.WorldCoords.YawFromDirection(x - me.X, y - me.Y);
+                Emit($"[x2 scenario] face {x:F0} {y:F0} from {me.X:F1} {me.Y:F1}");
+                break;
+            }
+            case "wheel":
+            {
+                // wheel <up|down> [alt|shift|ctrl] [count]: mouse wheel notches at the pointer (the builder turns the ghost)
+                var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var button = parts.Length > 0 && parts[0] == "down" ? MouseButton.WheelDown : MouseButton.WheelUp;
+                var count = parts.Select(p => int.TryParse(p, out var n) ? n : 0).FirstOrDefault(n => n > 0);
+                var pos = GetViewport().GetMousePosition();
+                for (var i = 0; i < Math.Max(1, count); i++)
+                    foreach (var pressed in new[] { true, false })
+                        Input.ParseInputEvent(new InputEventMouseButton
+                        {
+                            Position = pos, GlobalPosition = pos, ButtonIndex = button, Pressed = pressed, Factor = 1,
+                            AltPressed = parts.Contains("alt"), ShiftPressed = parts.Contains("shift"), CtrlPressed = parts.Contains("ctrl"),
+                        });
+                _scenarioWaitUntil = _scenarioClock + 0.2;
+                break;
+            }
+            case "builder":
+            {
+                // builder: logs the housing builder's step, spot, yaw, local verdict and last quote
+                var session = LiveSession;
+                if (session is null) { Emit("[x2 scenario] builder: no session"); break; }
+                var (position, yaw) = session.BuilderPlacement;
+                var quote = session.LastHousingQuote;
+                Emit($"[x2 scenario] builder step={session.BuilderStep} design={session.ActiveHousingPlacement?.Design.DesignId} " +
+                     $"at {position.X:F1},{position.Y:F1},{position.Z:F2} yaw={Mathf.RadToDeg(yaw):F1} " +
+                     $"quote={(quote is null ? "-" : $"{quote.BaseTax}/{quote.DepositTax}/{quote.TotalTax}")}");
+                break;
+            }
+            case "houses":
+            {
+                // houses: logs the houses the session knows (state, owner list, the one whose window is open)
+                var session = LiveSession;
+                if (session is null) break;
+                foreach (var (tl, h) in session.HouseStates)
+                {
+                    var p = h.Position.Value;
+                    Emit($"[x2 scenario] house tl={tl} db={h.DatabaseId} unit={h.ObjectId} design={h.TemplateId} model={h.ModelId} " +
+                         $"steps={h.CurrentStep}/{h.AllSteps} owner={h.OwnerName}({h.OwnerId}) perm={h.Permission} " +
+                         $"recover={h.AllowRecover} name='{h.HouseName}' at {p.X:F1},{p.Y:F1},{p.Z:F2} " +
+                         $"tax={(session.HouseTax(tl) is { } t ? $"{t.MoneyAmount}/{t.SecondaryMoneyAmount} paid={t.IsAlreadyPaid}" : "-")}");
+                }
+                foreach (var owned in session.OwnedHouses.Values)
+                    Emit($"[x2 scenario] owned tl={owned.TimelineId} design={owned.TemplateId} name='{owned.HouseName}' perm={owned.Permission}");
+                Emit($"[x2 scenario] interacting house: {session.InteractingHouse?.ToString() ?? "none"}");
+                break;
+            }
+            case "rclickhouse":
+            {
+                // rclickhouse [design]: right-clicks the nearest known house (optionally of that design) at its screen pixel
+                var session = LiveSession;
+                var camera = GetViewport().GetCamera3D();
+                if (session?.World is not { } world || camera is null) break;
+                var me = session.Player.CryPosition;
+                var design = uint.TryParse(arg, out var wanted) ? wanted : 0;
+                var house = session.HouseStates.Values.Where(h => design == 0 || h.TemplateId == design)
+                    .OrderBy(h => System.Numerics.Vector3.Distance(h.Position.Value, me)).FirstOrDefault();
+                if (house is null) { Emit("[x2 scenario] no house"); break; }
+                var p = house.Position.Value;
+                var pixel = camera.UnprojectPosition(world.ToGodot(p.X, p.Y, p.Z + 1.2f));
+                Input.WarpMouse(pixel);
+                Input.ParseInputEvent(new InputEventMouseMotion { Position = pixel, GlobalPosition = pixel });
+                Input.ParseInputEvent(new InputEventMouseButton { Position = pixel, GlobalPosition = pixel, ButtonIndex = MouseButton.Right, Pressed = true });
+                Input.ParseInputEvent(new InputEventMouseButton { Position = pixel, GlobalPosition = pixel, ButtonIndex = MouseButton.Right, Pressed = false });
+                Emit($"[x2 scenario] rclickhouse tl={house.TimelineId} unit={house.ObjectId} at pixel {pixel.X:F0},{pixel.Y:F0}");
+                _scenarioWaitUntil = _scenarioClock + 0.3;
+                break;
+            }
+            case "interacthouse":
+            {
+                // interacthouse [design]: right-click interaction with the nearest house without aiming (InteractWith)
+                var session = LiveSession;
+                if (session is null) break;
+                var me = session.Player.CryPosition;
+                var design = uint.TryParse(arg, out var wanted) ? wanted : 0;
+                var house = session.HouseStates.Values.Where(h => design == 0 || h.TemplateId == design)
+                    .OrderBy(h => System.Numerics.Vector3.Distance(h.Position.Value, me)).FirstOrDefault();
+                if (house is null) { Emit("[x2 scenario] no house"); break; }
+                Emit($"[x2 scenario] interacthouse tl={house.TimelineId}: {(session.InteractWith(house.ObjectId) ? "ok" : "refused")}");
+                break;
+            }
+            case "nameplate":
+            {
+                // nameplate <tl>: right-click use of the house's DoodadFuncParentInfo nameplate (opens the house window)
+                var session = LiveSession;
+                if (session is null || !ushort.TryParse(arg, out var tl)) break;
+                if (tl == 0) tl = NearestOwnHouse(session) ?? 0; // 0: the nearest own house
+                var doodad = session.HouseNameplateOf(tl);
+                Emit($"[x2 scenario] nameplate tl={tl} doodad={doodad}: " +
+                     $"{(doodad is { } id && session.InteractWith(id) ? "used" : "none")}");
+                break;
+            }
+            case "houseskills":
+            {
+                // houseskills <tl> <skill>...: the client's reaction to an SCNpcInteractionSkillList for that house
+                var parts = arg.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var session = LiveSession;
+                if (session is null || parts.Length < 2) break;
+                var houseTl = ushort.Parse(parts[0]);
+                if (houseTl == 0) houseTl = NearestOwnHouse(session) ?? 0; // 0: the nearest own house
+                var ok = session.SimulateHouseInteractionSkills(houseTl, parts.Skip(1).Select(uint.Parse).ToArray());
+                Emit($"[x2 scenario] houseskills {arg}: {(ok ? "handled" : "no house")}");
+                break;
+            }
+            case "construct":
+            {
+                // construct: casts the current build step's skill on the house whose window is open (or the nearest own house)
+                var session = LiveSession;
+                if (session is null) break;
+                var me = session.Player.CryPosition;
+                var tl = session.InteractingHouse ?? session.HouseStates.Values
+                    .Where(h => h.OwnerId == session.Entered.CharacterId && h.AllSteps > 0)
+                    .OrderBy(h => System.Numerics.Vector3.Distance(h.Position.Value, me)).Select(h => (ushort?)h.TimelineId).FirstOrDefault();
+                Emit($"[x2 scenario] construct tl={tl}: {(tl is { } t && session.ConstructHouseStep(t) ? "sent" : "refused")}");
+                break;
+            }
             default:
                 Emit($"[x2 scenario] unknown step: {line}");
                 break;
         }
+    }
+
+    private static ushort? NearestOwnHouse(Client.OnlineSession session)
+    {
+        var me = session.Player.CryPosition;
+        return session.HouseStates.Values.Where(h => h.OwnerId == session.Entered.CharacterId)
+            .OrderBy(h => System.Numerics.Vector3.Distance(h.Position.Value, me))
+            .Select(h => (ushort?)h.TimelineId).FirstOrDefault();
     }
 
     private static void PressChord(string chord)

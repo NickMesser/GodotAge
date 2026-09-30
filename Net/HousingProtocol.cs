@@ -79,6 +79,26 @@ public sealed record HouseTaxInfoEvent(
     bool IsHeavyTaxHouse,
     byte TaxType) : GameEvent;
 
+/// <summary>
+/// SCConstructHouseTax (0x0F8): the server's construction quote for a design at the chosen spot, answering
+/// CSConstructHouseTax. The real client turns it into HOUSE_BUILD_INFO (captured 2026-09-30: the body
+/// 0b010000 00000000 00000000 01 50c3000000000000 a086010000000000 0000000000000000 0000000000000000 00000000
+/// became HOUSE_BUILD_INFO(267, "50000", "0", 0, 0, true, 0, "100000", 1, false)).
+/// </summary>
+public sealed record HouseConstructTaxEvent(
+    uint DesignId,
+    int HeavyTaxHouseCount,
+    int NormalTaxHouseCount,
+    bool IsHeavyTaxHouse,
+    ulong BaseTax,
+    ulong DepositTax,
+    ulong TotalTax,
+    ulong WeeklyTax,
+    uint HostileTaxRate) : GameEvent;
+
+/// <summary>SCHousingRecoverToggle (0x0F9): the furniture-recovery flag of a house changed.</summary>
+public sealed record HouseRecoverToggledEvent(ushort TimelineId, bool AllowRecover) : GameEvent;
+
 /// <summary>Strict inbound housing decoders for the 10.0.2.13 game protocol.</summary>
 public static class HousingProtocol
 {
@@ -90,6 +110,8 @@ public static class HousingProtocol
     public const ushort SCHouseRemoved = 0x0F5;
     public const ushort SCHouseFarm = 0x0F6;
     public const ushort SCHouseTaxInfo = 0x0F7;
+    public const ushort SCConstructHouseTax = 0x0F8;
+    public const ushort SCHousingRecoverToggle = 0x0F9;
 
     /// <summary>Parses one supported server housing packet.</summary>
     public static GameEvent Parse(ushort opcode, byte[] body) => opcode switch
@@ -102,6 +124,8 @@ public static class HousingProtocol
         SCHouseRemoved => ParseRemoved(body),
         SCHouseFarm => ParseFarmSummary(body),
         SCHouseTaxInfo => ParseTaxInfo(body),
+        SCConstructHouseTax => ParseConstructTax(body),
+        SCHousingRecoverToggle => ParseRecoverToggle(body),
         _ => throw new ArgumentOutOfRangeException(nameof(opcode), opcode, "not a supported housing opcode"),
     };
 
@@ -219,6 +243,24 @@ public static class HousingProtocol
         return result;
     }
 
+    /// <summary>SCConstructHouseTax (0x0F8), 49 bytes: design, two house counts, heavy flag, four u64 amounts, hostile rate.</summary>
+    public static HouseConstructTaxEvent ParseConstructTax(byte[] body)
+    {
+        var r = new WireReader(body);
+        var result = new HouseConstructTaxEvent(
+            r.U32(), r.S32(), r.S32(), r.Bool(), r.U64(), r.U64(), r.U64(), r.U64(), r.U32());
+        RequireConsumed(r, nameof(ParseConstructTax));
+        return result;
+    }
+
+    public static HouseRecoverToggledEvent ParseRecoverToggle(byte[] body)
+    {
+        var r = new WireReader(body);
+        var result = new HouseRecoverToggledEvent(r.U16(), r.Bool());
+        RequireConsumed(r, nameof(ParseRecoverToggle));
+        return result;
+    }
+
     private static HousingWorldPosition ReadPosition(WireReader r) =>
         new(r.S64(), r.S64(), r.F32());
 
@@ -229,12 +271,12 @@ public static class HousingProtocol
     }
 }
 
-/// <summary>Parser-family adapter for the contiguous 0x0F0-0x0F7 housing packet range.</summary>
+/// <summary>Parser-family adapter for the contiguous inbound 0x0F0-0x0F9 housing packet range.</summary>
 public sealed class HousingPacketParserFamily : IPacketParserFamily
 {
     public bool TryParse(ushort opcode, byte[] body, out IReadOnlyList<GameEvent> events)
     {
-        if (opcode is < HousingProtocol.SCHouseState or > HousingProtocol.SCHouseTaxInfo)
+        if (opcode is < HousingProtocol.SCHouseState or > HousingProtocol.SCHousingRecoverToggle)
         {
             events = [];
             return false;

@@ -501,6 +501,7 @@ public partial class X2UiLayer
             },
         };
         _protocolQuestData.DirectingModeChanged += SetQuestDirectingMode;
+        _protocolWorldData?.SetItemInfoSource(id => _protocolItemsData?.GetItemInfo(id));
         _protocolEconomyData?.SetCraftLabor(() => Labor() + LocalLabor());
         _protocolEconomyData?.SetCraftTargetTemplate(() =>
             _craftDoodadObjectId != 0 ? _craftDoodadTemplateId : Bridge?.Get(Bridge.TargetId)?.TemplateId ?? 0);

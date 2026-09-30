@@ -290,7 +290,8 @@ public partial class OnlineSession
         {
             ShopState.Apply(value);
             ShopUpdated?.Invoke(value);
-            if (value is NpcInteractionSkillsEvent opened)
+            // A house's skill list is the housing reducer's (the window or the build step), not an NPC dialog.
+            if (value is NpcInteractionSkillsEvent opened && HouseTimelineOf(opened.NpcUnitId) is null)
             {
                 ShopOpened?.Invoke(opened);
                 NpcInteractionStarted?.Invoke(opened);

@@ -67,6 +67,7 @@ public sealed class DoodadModelResolver
     private readonly string _connectionString;
     private readonly ConcurrentDictionary<(uint TemplateId, uint PhaseId), DoodadInteractionKind> _interactionCache = new();
     private readonly ConcurrentDictionary<(uint TemplateId, uint PhaseId), DoodadInteractionResolution> _interactionResolutionCache = new();
+    private readonly ConcurrentDictionary<(uint TemplateId, uint PhaseId), bool> _parentInfoCache = new();
 
     /// <param name="databasePath">Path to <c>compact.sqlite3</c>; it is opened read-only.</param>
     public DoodadModelResolver(string databasePath)
@@ -137,6 +138,28 @@ public sealed class DoodadModelResolver
         phaseId == 0
             ? new(DoodadUiInteractionKind.None, 0)
             : _interactionResolutionCache.GetOrAdd((templateId, phaseId), LoadInteractionResolution);
+
+    /// <summary>
+    /// Whether the doodad's live function group has a DoodadFuncParentInfo (a house's "building management
+    /// nameplate", func skill 15212): using it opens the parent house's window.
+    /// </summary>
+    public bool HasParentInfoFunc(uint templateId, uint phaseId) =>
+        phaseId != 0 && _parentInfoCache.GetOrAdd((templateId, phaseId), key =>
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1 FROM doodad_funcs AS f
+                      JOIN doodad_func_groups AS g ON g.id = f.doodad_func_group_id
+                     WHERE g.doodad_almighty_id = $templateId AND g.id = $phaseId
+                       AND f.actual_func_type = 'DoodadFuncParentInfo');
+                """;
+            command.Parameters.AddWithValue("$templateId", (long)key.TemplateId);
+            command.Parameters.AddWithValue("$phaseId", (long)key.PhaseId);
+            return Convert.ToInt64(command.ExecuteScalar()) != 0;
+        });
 
     private DoodadInteractionResolution LoadInteractionResolution((uint TemplateId, uint PhaseId) key)
     {

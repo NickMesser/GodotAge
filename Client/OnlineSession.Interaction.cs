@@ -32,6 +32,8 @@ public partial class OnlineSession
         TargetKind.Npc => BeginNpcInteraction(target, pickedWithRightMouse),
         TargetKind.Doodad => BeginDoodadInteraction(target),
         TargetKind.Vehicle => BeginVehicleInteraction(target),
+        // Houses: the real client sent CSStartInteraction for a right click and nothing for F (captured 2026-09-30).
+        TargetKind.Other when HouseTimelineOf(target.Id) is not null => pickedWithRightMouse && BeginHouseInteraction(target),
         _ => false,
     };
 
@@ -40,6 +42,15 @@ public partial class OnlineSession
         if (Client.Stage != ClientStage.InWorld ||
             !_units.TryGetValue(target.Id, out var live) || live.Snapshot.Kind != UnitKind.Doodad)
             return false;
+
+        // A house's DoodadFuncParentInfo nameplate (func skill 15212 "Check Construction Info") opens the house
+        // window in the client itself (x2game FUN_3987b670 -> FUN_398861b0).
+        if (Doodads.HasParentInfoFunc(live.Snapshot.TemplateId, live.Snapshot.PhaseId) &&
+            OpenHouseFromNameplate(target.Id, live.Snapshot.ParentUnitId))
+        {
+            FaceTarget(target);
+            return true;
+        }
 
         var interaction = Doodads.ResolveInteraction(live.Snapshot.TemplateId, live.Snapshot.PhaseId);
         if (interaction.UiKind == DoodadUiInteractionKind.None && interaction.SkillId == 0)
@@ -74,11 +85,10 @@ public partial class OnlineSession
 
         if (pickedWithRightMouse)
         {
-            // AAEmu's server interaction flow establishes extraInfo=1 and the plain path's pickId=-1.
-            // No supplied capture contains this packet; object, mouse, and modifier values are
-            // the empty, right-button, and no-modifier context inferred for this client input.
+            // The real client's right click on a unit sent CSStartInteraction(unit, 0, extraInfo 1, pickId -1,
+            // mouse 2, modifiers 0) (captured 2026-09-30 on a house; the same packet serves NPCs).
             Client.SendGame(CombatPacketWriters.StartNpcInteraction(
-                target.Id, objectId: 0, extraInfo: 1, pickId: -1, mouseButton: 1, modifierKeys: 0));
+                target.Id, objectId: 0, extraInfo: 1, pickId: -1, mouseButton: 2, modifierKeys: 0));
         }
         else
         {

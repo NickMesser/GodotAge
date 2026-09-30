@@ -93,6 +93,13 @@ public partial class X2UiLayer
         }
         if (action == "open_config")
         {
+            // While the housing builder places a design, Escape ends it (the real client answered with BUILDER_END and
+            // opened nothing)
+            if (LiveSession?.BuilderStep is Client.HousingBuilderStep.Position or Client.HousingBuilderStep.Rotation)
+            {
+                LiveSession.CancelHousingPlacement();
+                return true;
+            }
             // Escape closes the frontmost open window (one with a title bar), else toggles the game menu
             var top = Root.TopLevel.Where(w => w.Visible && w is WindowWidget && w.GetChildByName("titleBar") != null)
                 .OrderByDescending(w => w.RaiseOrder).FirstOrDefault();

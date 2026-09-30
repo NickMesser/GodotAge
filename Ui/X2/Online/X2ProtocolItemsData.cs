@@ -583,6 +583,10 @@ public sealed class X2ProtocolItemsData : NullItemsData
     {
         if (System.Environment.GetEnvironmentVariable("X2_TRACE_ITEMS") == "1")
             Godot.GD.Print($"[items] use item {item.TemplateId}/{item.ItemId}");
+        // A housing design enters the builder instead of casting (the real client sent nothing until the builder's
+        // rotation click; captured 2026-09-30 with Scarecrow Garden Design 15596).
+        if (session.BeginHousingPlacement(item.TemplateId, item.ItemId))
+            return true;
         // Slave summon scrolls cast their summon_pos skill ahead of the character, or despawn the slave they summoned.
         if (session.TryUseSummonSlaveItem(item))
             return true;

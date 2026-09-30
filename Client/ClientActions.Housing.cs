@@ -7,9 +7,9 @@ namespace AAEmu.GodotViewer.Client;
 
 /// <summary>Housing requests whose generated native body and AAEmu reader have the same wire layout.</summary>
 /// <remarks>
-/// CSConstructHouseTax (0x08B), CSCreateHouse (0x08C), CSRequestHouseTax (0x090),
-/// CSSellHouse (0x093), and CSBuyHouse (0x095) are intentionally unsupported because their generated
-/// bodies conflict with AAEmu's readers. Requests absent from PacketBodies.g.cs are also omitted.
+/// CSConstructHouseTax (0x08B), CSCreateHouse (0x08C) and the tax/recovery requests are in
+/// <see cref="HousingRequests"/> (the builder sends them from OnlineSession). CSSellHouse (0x093) and CSBuyHouse
+/// (0x095) remain unsupported because their generated bodies conflict with AAEmu's readers.
 /// </remarks>
 public sealed partial class ClientActions
 {
@@ -56,6 +56,14 @@ public sealed partial class ClientActions
     /// <summary>Changes the prepaid-tax option for a house timeline id.</summary>
     public void PrepayHouseTax(short houseTimelineId, bool ausp) =>
         Send(CSPrepayHouseTax, new WireWriter().S16(houseTimelineId).Bool(ausp).ToArray());
+
+    /// <summary>Asks for a house's tax information (answered by SCHouseTaxInfo).</summary>
+    public void RequestHouseTax(ushort houseTimelineId) =>
+        Send(HousingRequests.CSRequestHouseTax, HousingRequests.RequestHouseTax(houseTimelineId));
+
+    /// <summary>Toggles whether the house's furniture may be recovered by others.</summary>
+    public void ToggleHousingRecover(ushort houseTimelineId) =>
+        Send(HousingRequests.CSAllowHousingRecover, HousingRequests.AllowHousingRecover(houseTimelineId));
 
     /// <summary>Requests display of the common-farm area for the native signed type selector.</summary>
     public void ShowCommonFarmArea(int type) =>

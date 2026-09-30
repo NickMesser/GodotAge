@@ -654,6 +654,18 @@ public sealed class UiRoot
     private static bool IsPassiveContainer(Widget w)
         => (w is EmptyWidget || w is WindowWidget) && !w.DragEnabled && !MouseHandlers.Any(w.HasHandler);
 
+    /// <summary>
+    /// Whether the point lies in a part of the widget that a scroll viewport (EnableScroll ancestor) hides; the
+    /// renderer clips those parts (X2UiLayer.ClipOf), so they must not take the pointer either. Without this the
+    /// scrolled-out rest of a text box (the demolish dialog's caution list) swallowed clicks on the buttons below it.
+    /// </summary>
+    private static bool ClippedAway(Widget w, float x, float y)
+    {
+        for (var ancestor = w.Parent; ancestor != null; ancestor = ancestor.Parent)
+            if (ancestor.ScrollEnabled && !ancestor.ScreenRect.Contains(x, y)) return true;
+        return false;
+    }
+
     internal Widget? HitTest(float x, float y)
     {
         // The top-most widget under the pointer that reacts to the mouse wins; plain containers (empty widgets and
@@ -665,7 +677,7 @@ public sealed class UiRoot
         {
             var w = order[i];
             if (!w.PickEnabled || !w.ClickableState || !w.IsEffectivelyVisible() || w.FadingOut) continue;
-            if (!w.ScreenRect.Contains(x, y)) continue;
+            if (!w.ScreenRect.Contains(x, y) || ClippedAway(w, x, y)) continue;
             // never reach through a window into another top-level window behind it
             if (fallback != null && !ReferenceEquals(TopOf(w), TopOf(fallback))) return fallback;
             if (!IsPassiveContainer(w)) return w;

@@ -49,6 +49,15 @@ public partial class WorldHoverPresentation : CanvasLayer
 
     public ITargetable? Hovered => _hovered;
 
+    /// <summary>
+    /// A pak cursor that replaces the hover cursor while set and non-null (the housing builder's
+    /// ui/cursor/housing_position|rotation|invalid.dds).
+    /// </summary>
+    public static Func<string?>? CursorOverride { get; set; }
+
+    private readonly Dictionary<string, Texture2D?> _overrideCursors = [];
+    private string? _currentOverride;
+
     public override void _Ready()
     {
         Layer = 40;
@@ -59,6 +68,22 @@ public partial class WorldHoverPresentation : CanvasLayer
 
     public override void _Process(double delta)
     {
+        if (CursorOverride?.Invoke() is { } overridePath && LoadingScreen?.Visible != true)
+        {
+            SetHover(null);
+            if (_currentOverride != overridePath)
+            {
+                if (!_overrideCursors.TryGetValue(overridePath, out var texture))
+                    _overrideCursors[overridePath] = texture = LoadCursor(overridePath);
+                _currentOverride = overridePath;
+                _currentCursor = (HoverCursor)(-1);
+                Input.SetCustomMouseCursor(texture, Input.CursorShape.Arrow,
+                    texture is null ? Vector2.Zero : texture.GetSize() / 2f);
+            }
+            return;
+        }
+        _currentOverride = null;
+
         if (LoadingScreen?.Visible == true || Camera == null || Targeting == null || Registry == null ||
             OrbitCamera?.IsRightMouseHeld == true)
         {

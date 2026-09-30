@@ -8,7 +8,7 @@ using AAEmu.GodotViewer.Ui.X2.Scripting.World;
 namespace AAEmu.GodotViewer.Ui.X2.Online;
 
 /// <summary>Current world and zone information for the original HUD's X2World/X2Map calls.</summary>
-public sealed class X2ProtocolWorldData : NullWorldData, IDisposable
+public sealed partial class X2ProtocolWorldData : NullWorldData, IDisposable
 {
     private readonly GameData? _data;
     private readonly SlaveModelResolver? _slaveModels;
@@ -17,11 +17,13 @@ public sealed class X2ProtocolWorldData : NullWorldData, IDisposable
     private readonly Dictionary<uint, (bool IsShip, string Kind)> _slaveClassifications = [];
     private int _zoneId;
     private OnlineSession? _session;
+    private readonly string _gameDatabase;
 
     public X2ProtocolWorldData(string gameDatabase, int zoneId, IX2Events events,
         Func<ClientActions?>? actions = null)
     {
         _zoneId = zoneId;
+        _gameDatabase = gameDatabase;
         _events = events;
         _actions = actions;
         if (File.Exists(gameDatabase))
@@ -126,6 +128,8 @@ public sealed class X2ProtocolWorldData : NullWorldData, IDisposable
 
     public override X2WorldCommandResult Execute(X2WorldCommand command)
     {
+        if (command.Table == "X2House")
+            return ExecuteHouse(command);
         if (command.Table != "X2SiegeWeapon" || command.Method != "SetSiegeWeaponName" ||
             CurrentSlave() is not { MySlave: { } mine } || _actions?.Invoke() is not { } actions ||
             command.Arguments.FirstOrDefault()?.ToString() is not { Length: > 0 } name)
@@ -153,9 +157,14 @@ public sealed class X2ProtocolWorldData : NullWorldData, IDisposable
     public void Attach(OnlineSession session)
     {
         if (ReferenceEquals(_session, session)) return;
-        if (_session != null) _session.GameEventApplied -= OnGameEvent;
+        if (_session != null)
+        {
+            _session.GameEventApplied -= OnGameEvent;
+            DetachHousing(_session);
+        }
         _session = session;
         session.GameEventApplied += OnGameEvent;
+        AttachHousing(session);
         if (session.CombatState.LastCharacterDetail is { } detail && detail.ZoneId > 0)
             ChangeZone(detail.ZoneId);
     }
@@ -187,7 +196,11 @@ public sealed class X2ProtocolWorldData : NullWorldData, IDisposable
 
     public void Dispose()
     {
-        if (_session != null) _session.GameEventApplied -= OnGameEvent;
+        if (_session != null)
+        {
+            _session.GameEventApplied -= OnGameEvent;
+            DetachHousing(_session);
+        }
         _session = null;
         _data?.Dispose();
     }
